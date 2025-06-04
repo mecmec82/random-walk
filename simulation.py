@@ -9,7 +9,7 @@ import pandas as pd
 st.set_page_config(page_title="Crypto Random Walk Simulation", layout="wide")
 
 st.title("Crypto Price Random Walk Simulation")
-st.write("Simulate multiple future crypto price movements using random walks based on historical volatility.")
+st.write("Simulate multiple future crypto price movements using random walks and visualize the median and standard deviation.")
 
 # --- Input Parameters ---
 st.sidebar.header("Simulation Settings")
@@ -21,7 +21,7 @@ ticker = st.sidebar.text_input("Trading Pair (e.g., BTC/USD)", 'BTC/USD').upper(
 
 historical_days = st.sidebar.number_input("Historical Trading Days for Analysis", min_value=50, value=300, step=10)
 simulation_days = st.sidebar.number_input("Future Simulation Days", min_value=1, value=30, step=1)
-num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_value=1, value=20, step=1) # New control
+num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_value=1, value=20, step=1) # Number of simulations
 
 st.sidebar.write("Data fetched using CCXT. Public data access typically does not require an API key.")
 st.sidebar.write("Free data sources may have rate limits or data availability issues.")
@@ -74,43 +74,29 @@ if st.button("Run Simulation"):
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
             # --- Timestamp Conversion ---
-            df['timestamp_dt'] = pd.NaT # Initialize a new column for datetime objects
+            df['timestamp_dt'] = pd.NaT
             converted = False
-            conversion_unit_used = None
 
-            # Try converting as milliseconds
             try:
                  temp_dt = pd.to_datetime(df['timestamp'], unit='ms')
                  if not temp_dt.isnull().any() and temp_dt.min().year >= 1990 and temp_dt.max().year <= datetime.now().year + 2:
                       df['timestamp_dt'] = temp_dt
                       converted = True
-                      conversion_unit_used = 'ms'
-                 else:
-                     #st.warning(f"Conversion with unit='ms' resulted in unusual/invalid dates.") # Suppress this specific warning in final app unless needed for debug
-                     pass
-            except Exception: # as ts_error_ms: # Suppress error detail unless needed for debug
-                 #st.warning(f"Conversion with unit='ms' failed.")
+            except Exception:
                  pass
 
-            # If not converted, try converting as seconds
             if not converted:
                  try:
                       temp_dt = pd.to_datetime(df['timestamp'], unit='s')
                       if not temp_dt.isnull().any() and temp_dt.min().year >= 1990 and temp_dt.max().year <= datetime.now().year + 2:
                            df['timestamp_dt'] = temp_dt
                            converted = True
-                           conversion_unit_used = 's'
-                      #else:
-                          #st.warning(f"Conversion with unit='s' resulted in unusual/invalid dates.")
-                 except Exception: # as ts_error_s: # Suppress error detail
-                      #st.warning(f"Conversion with unit='s' failed.")
+                 except Exception:
                       pass
 
             if not converted:
                  st.error("Failed to convert timestamps to valid dates using 'ms' or 's'. Data format might be unexpected.")
                  st.stop()
-
-            # st.success(f"Successfully converted timestamps using unit='{conversion_unit_used}'.") # Suppress success message unless needed for debug
 
             df = df.dropna(subset=['timestamp_dt'])
             df.set_index('timestamp_dt', inplace=True)
@@ -157,56 +143,93 @@ if st.button("Run Simulation"):
     last_historical_date = historical_dates.max()
 
     # Generate future dates for the simulation
+    simulated_dates = pd.DatetimeIndex([]) # Initialize as empty
     try:
-        simulated_dates = pd.date_range(start=last_historical_date, periods=simulation_days + 1, freq='B')[1:] # [1:] excludes start date
+        # Add 1 because the simulation path includes the starting point (last historical date)
+        # but pd.date_range starts *after* the given date with freq='B'
+        simulated_dates = pd.date_range(start=last_historical_date, periods=simulation_days + 1, freq='B')[1:]
+
         if len(simulated_dates) != simulation_days:
-             st.warning(f"Could not generate exactly {simulation_days} business days after {last_historical_date.strftime('%Y-%m-%d')}. Generated {len(simulated_dates)}. Simulation path length might be affected.")
+             st.warning(f"Could not generate exactly {simulation_days} business days after {last_historical_date.strftime('%Y-%m-%d')}. Generated {len(simulated_dates)}. Simulation path length will be adjusted.")
+             # Trim simulation path length to match generated dates + start point
+             sim_path_length = len(simulated_dates) + 1
+        else:
+             sim_path_length = simulation_days + 1
 
     except Exception as date_range_error:
-         st.error(f"Error generating future dates for simulation: {date_range_error}. Cannot plot simulation.")
-         simulated_dates = pd.DatetimeIndex([]) # Set to empty if error
+         st.error(f"Error generating future dates for simulation: {date_range_error}. Cannot run simulation.")
+         simulated_dates = pd.DatetimeIndex([]) # Ensure it's empty on error
+         sim_path_length = 0
 
 
     # Combine historical last date with simulated dates for plotting the simulation paths
+    plot_sim_dates = pd.DatetimeIndex([]) # Initialize as empty
     if len(simulated_dates) > 0:
         last_historical_date_index = pd.DatetimeIndex([last_historical_date])
         plot_sim_dates = last_historical_date_index.append(simulated_dates)
-        # Ensure it's a DatetimeIndex after append
-        plot_sim_dates = pd.DatetimeIndex(plot_sim_dates)
+        plot_sim_dates = pd.DatetimeIndex(plot_sim_dates) # Final check
     else:
-        plot_sim_dates = pd.DatetimeIndex([]) # Empty if simulation dates generation failed
+        st.warning("Skipping simulation date axis generation.")
 
 
     # --- Run Multiple Simulations ---
     all_simulated_paths = []
-    if len(simulated_dates) > 0:
+    if sim_path_length > 0 and len(historical_data_close_analyzed) > 0:
         with st.spinner(f"Running {num_simulations} simulations for {simulation_days} days..."):
-            for i in range(num_simulations):
+            start_price = historical_data_close_analyzed.iloc[-1]
+            for _ in range(num_simulations):
                  # Generate random daily log returns for this simulation path
                 simulated_log_returns = np.random.normal(
                     loc=mean_daily_log_return,
                     scale=daily_log_volatility,
-                    size=simulation_days
+                    size=simulation_days # Always generate for the requested simulation_days
                 )
 
                 # --- Calculate Simulated Price Path ---
-                simulated_price_path = np.zeros(simulation_days + 1)
-                simulated_price_path[0] = historical_data_close_analyzed.iloc[-1] # Start from the last historical price
+                simulated_price_path = np.zeros(sim_path_length) # Use the potentially trimmed length
+                if sim_path_length > 0:
+                    simulated_price_path[0] = start_price
 
-                for j in range(1, simulation_days + 1):
-                    simulated_price_path[j] = simulated_price_path[j-1] * np.exp(simulated_log_returns[j-1])
-
-                # Trim path if simulated_dates was trimmed
-                if len(simulated_price_path) > len(simulated_dates) + 1:
-                     simulated_price_path = simulated_price_path[:len(simulated_dates) + 1]
+                    # Only apply returns up to the number of generated dates
+                    for j in range(1, sim_path_length):
+                        # Use the corresponding random return. Index is j-1 because returns array has length simulation_days.
+                        # This works even if sim_path_length < simulation_days + 1
+                        simulated_price_path[j] = simulated_price_path[j-1] * np.exp(simulated_log_returns[j-1])
 
                 all_simulated_paths.append(simulated_price_path)
     else:
-        st.warning("Skipping simulations as future dates could not be generated.")
+        st.warning("Skipping simulations as future dates could not be generated or historical data is missing.")
+
+    # --- Calculate Median and Standard Deviation Across Simulations ---
+    median_prices = np.array([])
+    mean_prices = np.array([])
+    std_dev_prices = np.array([])
+    upper_band = np.array([])
+    lower_band = np.array([])
+
+    if len(all_simulated_paths) > 0 and len(all_simulated_paths[0]) > 0:
+        # Convert list of paths into a numpy array for easier column-wise operations
+        # Check that all paths have the same length before stacking
+        if all(len(path) == sim_path_length for path in all_simulated_paths):
+             all_simulated_paths_np = np.vstack(all_simulated_paths) # Stack rows vertically
+             # Now transpose to have prices at each step in columns
+             prices_at_each_step = all_simulated_paths_np.T # Transpose
+
+             # Calculate median, mean, std dev for each step (column)
+             median_prices = np.median(prices_at_each_step, axis=1)
+             mean_prices = np.mean(prices_at_each_step, axis=1)
+             std_dev_prices = np.std(prices_at_each_step, axis=1)
+
+             # Calculate +/- 1 standard deviation band
+             upper_band = mean_prices + std_dev_prices
+             lower_band = mean_prices - std_dev_prices
+
+        else:
+             st.error("Simulation paths have inconsistent lengths. Cannot calculate aggregate statistics.")
 
 
     # --- Plotting ---
-    st.subheader("Price Chart: Historical Data and Multiple Simulated Paths")
+    st.subheader("Price Chart: Historical Data, Median, and Standard Deviation Band")
 
     fig, ax = plt.subplots(figsize=(14, 7))
 
@@ -216,65 +239,61 @@ if st.button("Run Simulation"):
     else:
         st.warning("No historical data available to plot.")
 
-    # Plot Simulated Data
-    if len(all_simulated_paths) > 0 and len(plot_sim_dates) > 1:
-        for i, path in enumerate(all_simulated_paths):
-            if len(plot_sim_dates) == len(path):
-                 ax.plot(plot_sim_dates, path, color='red', linestyle='--', alpha=0.3, linewidth=1, label='_nolegend_' if i > 0 else f'{num_simulations} Simulated Paths')
-            else:
-                 st.warning(f"Skipping simulation path {i+1} due to date and price length mismatch ({len(plot_sim_dates)} dates vs {len(path)} prices).")
+    # Plot Aggregated Simulated Data (Median and Band)
+    if len(plot_sim_dates) > 0 and len(median_prices) == len(plot_sim_dates):
+        # Plot Median Line
+        ax.plot(plot_sim_dates, median_prices, label=f'Median Simulated Price ({num_simulations} runs)', color='red', linestyle='-', linewidth=2)
 
-        # Add labels only if simulations were attempted and plotted
-        if any(len(path) > 1 and len(plot_sim_dates) == len(path) for path in all_simulated_paths):
-             # Only add legend if at least one path was successfully plotted
-             ax.legend()
+        # Plot Standard Deviation Band
+        # Use the same x-axis (plot_sim_dates) for the band
+        if len(upper_band) == len(plot_sim_dates) and len(lower_band) == len(plot_sim_dates):
+             ax.fill_between(plot_sim_dates, lower_band, upper_band, color='orange', alpha=0.3, label='+/- 1 Std Dev Band')
         else:
-             st.warning("No simulation paths could be plotted due to data length issues.")
+             st.warning("Length mismatch for plotting std dev band.")
 
+        # Add legend if simulation aggregates were plotted
+        ax.legend()
 
-    elif len(all_simulated_paths) > 0: # means len(plot_sim_dates) was not > 1
-         st.warning("Not enough future dates generated to plot simulations.")
+    elif len(all_simulated_paths) > 0: # Paths were generated, but aggregates couldn't be plotted
+        st.warning("Could not plot simulation aggregates due to data length issues.")
     else:
-         st.warning("No simulation paths were generated.")
+        st.warning("No simulation data available to plot.")
 
 
-    ax.set_title(f'{ticker} Price: Historical Data ({exchange_id}) and Random Walk Simulation')
+    ax.set_title(f'{ticker} Price: Historical Data ({exchange_id}) and Random Walk Simulation Aggregates')
     ax.set_xlabel('Date')
     ax.set_ylabel('Price ($)')
-
     ax.grid(True)
 
     # Use Streamlit's plotting function
     try:
         st.pyplot(fig)
-        # st.success("Plot generated successfully.") # Suppress success message
     except Exception as e:
         st.error(f"Error generating plot: {e}")
-        st.error("This error might still be related to date formatting within Matplotlib despite efforts to fix. Check console logs.")
-        # Optional: print debug info about dates if plot fails again
-        # st.write(f"Type of plot_sim_dates: {type(plot_sim_dates)}")
-        # if isinstance(plot_sim_dates, pd.DatetimeIndex):
-        #      st.write(f"Plot dates range: {plot_sim_dates.min()} to {plot_sim_dates.max()}")
-        # st.write(f"First 5 plot_sim_dates: {plot_sim_dates.tolist()[:5]}")
+        st.error("This error might still be related to date formatting within Matplotlib. Check console logs.")
 
     # Close the figure to prevent memory leaks
     plt.close(fig)
 
-    # --- Display Final Prices (Optional - might be too much for many sims) ---
+    # --- Display Final Results ---
     st.subheader("Simulation Results Overview")
     if len(historical_data_close_analyzed) > 0:
         st.write(f"**Last Historical Price** ({historical_data_close_analyzed.index[-1].strftime('%Y-%m-%d')}): **${historical_data_close_analyzed.iloc[-1]:.2f}**")
 
-    if len(all_simulated_paths) > 0 and len(all_simulated_paths[0]) > 0:
-         st.write(f"Ran **{len(all_simulated_paths)}** simulations.")
-         # Could add summary stats of ending prices here (mean, std dev, min, max)
-         final_prices = [path[-1] for path in all_simulated_paths if len(path) > 0]
-         if final_prices:
-              st.write(f"Simulated Ending Prices (after {len(simulated_dates)} steps):")
-              st.write(f"- Mean: ${np.mean(final_prices):.2f}")
-              st.write(f"- Min: ${np.min(final_prices):.2f}")
-              st.write(f"- Max: ${np.max(final_prices):.2f}")
-         else:
-              st.warning("No simulation paths were successfully generated or had data points.")
+    if len(median_prices) > 0: # Check if aggregates were calculated
+         st.write(f"Ran **{num_simulations}** simulations.")
+         # The last point in median_prices and the bands corresponds to the end date
+         st.write(f"Simulated Ending Prices (after {len(simulated_dates)} steps, {simulated_dates[-1].strftime('%Y-%m-%d')}):")
+         st.write(f"- Median: ${median_prices[-1]:.2f}")
+         st.write(f"- Mean: ${mean_prices[-1]:.2f}") # Also show mean for comparison
+         st.write(f"- Std Dev: ${std_dev_prices[-1]:.2f}")
+         st.write(f"- +/- 1 Std Dev Range: [${lower_band[-1]:.2f}, ${upper_band[-1]:.2f}]")
+
+         # Could also calculate min/max from the actual simulated paths for the range
+         if len(all_simulated_paths) > 0 and len(all_simulated_paths[0]) > 0:
+             final_prices = [path[-1] for path in all_simulated_paths]
+             st.write(f"- Actual Min Ending Price: ${np.min(final_prices):.2f}")
+             st.write(f"- Actual Max Ending Price: ${np.max(final_prices):.2f}")
+
     else:
-         st.warning("No simulated results to display.")
+         st.warning("No simulation results to display.")
