@@ -37,15 +37,15 @@ st.sidebar.write("Note: `coinbasepro` is generally better supported for trading 
 def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_call=1000):
     """
     Fetches historical OHLCV data by making multiple API calls if needed,
-    working backwards from the present.
+    working backwards from the present using the oldest timestamp.
     Returns a pandas DataFrame with datetime index.
     """
     all_ohlcv = []
-    # Start fetching from the current time (None means 'now')
-    since_timestamp = None # timestamp in milliseconds
+    # Start fetching from the current time (None means 'now' for the first call)
+    since_timestamp = None # timestamp in milliseconds of the *start* of the desired next chunk
     fetched_count = 0
-    # Estimate max attempts, plus a buffer for edge cases
-    max_fetch_attempts = math.ceil(num_days / limit_per_call) + 5 if limit_per_call > 0 else 5 # Avoid division by zero
+    # Estimate max attempts, plus a buffer for edge cases and partial chunks
+    max_fetch_attempts = math.ceil(num_days / limit_per_call) * 2 + 5 if limit_per_call > 0 else 10 # Double estimate + buffer
     attempt = 0
 
     st.info(f"Attempting to fetch approximately {num_days} daily candles for {ticker} from {exchange_id} using {limit_per_call} candles per call.")
@@ -55,7 +55,7 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
         exchange = getattr(ccxt, exchange_id)()
         # Optional: set timeout and rateLimit if needed
         # exchange.timeout = 10000 # 10 seconds
-        # exchange.rateLimit = 1000 # 1 second between requests
+        # exchange.rateLimit = 1000 # 1 second between requests - CCXT uses this for implicit sleeps
 
         # Check if the exchange supports fetchOHLCV
         if not exchange.has or not exchange.has.get('fetchOHLCV'):
@@ -75,22 +75,30 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
         st.error(f"Error initializing exchange or checking ticker/timeframe: {e}")
         return pd.DataFrame()
 
-    # Loop backwards from the present
+    # --- Fetch Loop ---
+    # We loop until we have enough candles or the exchange indicates no more history
     while fetched_count < num_days and attempt < max_fetch_attempts:
         attempt += 1
         try:
-            # Fetch data. We want data ending *around* `since_timestamp`.
-            # CCXT's fetch_ohlcv(..., since=timestamp, limit=N) usually means "get N candles starting from timestamp".
-            # To go backwards, we get the latest chunk (since=None).
-            # Then, the `since` for the next call should be the timestamp of the *first* candle in the previous chunk minus 1ms.
+            # fetch_ohlcv(symbol, timeframe, since=None, limit=None, params={})
+            # 'since' is the starting timestamp (inclusive)
+            # To fetch backwards, we need to determine the `since` timestamp for the *next* oldest chunk.
+            # The very first call `since=None` gets the latest data.
+            # For subsequent calls, `since` should be derived from the *oldest* candle timestamp of the *previously fetched* chunk.
 
-            st.info(f"Attempt {attempt}: Fetching {limit_per_call} candles with since={'None (latest)' if since_timestamp is None else datetime.utcfromtimestamp(since_timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S')}")
+            current_since_arg = since_timestamp # Use None for the first call
 
-            # Call fetch_ohlcv
-            chunk = exchange.fetch_ohlcv(ticker, timeframe, since=since_timestamp, limit=limit_per_call)
+            st.info(f"Attempt {attempt}: Requesting {limit_per_call} candles starting from {'None (latest)' if current_since_arg is None else datetime.utcfromtimestamp(current_since_arg / 1000).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
+            # Fetch data
+            # Note: CCXT handles the exchange's API nuances. For some, `since` means start, for others it might influence the end time implicitly when going backwards.
+            # The standard CCXT pattern for historical pagination relies on the exchange API returning candles *from* `since` up to `since + duration_of_limit`.
+            # To go backwards, we take the oldest candle's timestamp T, and the next call is `fetch_ohlcv(..., since=T)`. If the exchange API is well-behaved, this gets the chunk *before* the previous one.
+            # Some APIs might require `params={'endTime': T - 1}` which is non-standard. We stick to the standard `since` first.
+            chunk = exchange.fetch_ohlcv(ticker, timeframe, since=current_since_arg, limit=limit_per_call)
 
             if not chunk:
-                st.info(f"Attempt {attempt}: No data returned. Reached the end of available historical data or encountered an unhandled API response.")
+                st.info(f"Attempt {attempt}: No data returned for the given 'since' timestamp. Reached the end of available historical data or encountered an API issue returning empty chunks.")
                 break # No more data
 
             # --- DETAILED LOGGING FOR THIS CHUNK ---
@@ -101,10 +109,9 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
             if oldest_ts is not None and newest_ts is not None:
                 oldest_date = datetime.utcfromtimestamp(oldest_ts / 1000).strftime('%Y-%m-%d')
                 newest_date = datetime.utcfromtimestamp(newest_ts / 1000).strftime('%Y-%m-%d')
-                st.info(f"  Attempt {attempt}: Fetched {chunk_len} candles from {oldest_date} to {newest_date}.")
+                st.info(f"  Attempt {attempt}: Fetched {chunk_len} candles. Date Range: {oldest_date} to {newest_date}.")
             else:
                  st.info(f"  Attempt {attempt}: Fetched 0 candles.")
-
 
             if chunk_len == 0:
                  st.info("Chunk length is 0, stopping fetch.")
@@ -112,14 +119,18 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
 
 
             # Append the chunk to our list
+            # Important: When fetching backwards using `since=oldest_ts`, the newly fetched chunk
+            # is typically OLDER than the data already in all_ohlcv. So, prepend the new chunk.
+            # However, CCXT documentation examples often just extend and sort later. Let's stick to extend and sort for robustness against potential partial overlaps.
             all_ohlcv.extend(chunk)
-            fetched_count = len(all_ohlcv) # Update total count
 
-
-            # Set the 'since' for the *next* call to be 1 millisecond before the oldest candle
-            # This is the standard CCXT pagination pattern to go backwards.
-            # If the oldest candle is epoch 0, subtracting 1 might cause issues, but highly unlikely for crypto data.
+            # Update the 'since' for the *next* call. This should be the timestamp of the *oldest* candle
+            # in the *current* chunk, minus 1 millisecond.
+            # This is the core of getting the chunk immediately *before* the current one.
             since_timestamp = oldest_ts - 1
+
+            # Check total fetched count based on the list length
+            fetched_count = len(all_ohlcv)
 
             # Check if we have enough data. If so, we can break early.
             if fetched_count >= num_days:
@@ -129,8 +140,8 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
             # Implement a small delay to avoid hitting rate limits, especially on free tiers
             # Use the exchange's specified rate limit if available, otherwise default
             rate_limit_ms = exchange.rateLimit if hasattr(exchange, 'rateLimit') else 1000 # Default 1 second
-            # Add a buffer to the rate limit sleep
-            sleep_duration = rate_limit_ms / 1000 + 0.1 # Add 100ms buffer
+            # Add a small buffer to the rate limit sleep
+            sleep_duration = rate_limit_ms / 1000 + 0.1
             st.info(f"  Attempt {attempt}: Sleeping for {sleep_duration:.2f} seconds to respect rate limit.")
             time.sleep(sleep_duration)
 
@@ -138,8 +149,7 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
         except ccxt.RateLimitExceeded as e:
             st.warning(f"Attempt {attempt}: Rate limit exceeded: {e}. Waiting 5 seconds and retrying...")
             time.sleep(5) # Wait a fixed amount on rate limit error
-            # Don't increment attempt counter here, as we are retrying the same attempt logic
-            attempt -= 1 # Decrement so rate limit retries don't count towards max_fetch_attempts
+            attempt -= 1 # Decrement attempt counter so rate limit retries don't count towards max_fetch_attempts
             if attempt < -10: # Prevent infinite loop if rate limited constantly after few attempts
                  st.error(f"Too many consecutive rate limit errors. Stopping fetch.")
                  break
@@ -153,7 +163,7 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
     if attempt >= max_fetch_attempts:
          st.warning(f"Maximum fetch attempts ({max_fetch_attempts}) reached. Data may be incomplete ({fetched_count} candles fetched).")
     else:
-         st.success(f"Finished fetching historical data. Total chunks fetched: {attempt}.")
+         st.success(f"Finished fetching historical data. Total attempts made: {attempt}.")
 
 
     if not all_ohlcv:
@@ -179,13 +189,19 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
     df.set_index('timestamp_dt', inplace=True)
 
     # Sort by index (timestamp) and remove duplicates
-    # Sorting is crucial because fetching chunks backwards can result in unsorted data
+    # Sorting is crucial because fetching chunks backwards can result in unsorted data,
+    # and duplicates might occur at chunk boundaries.
     df = df.sort_index()
+    original_len = len(df)
     df = df.loc[~df.index.duplicated(keep='first')] # Keep the first occurrence of any duplicate timestamp
+    if len(df) < original_len:
+         st.info(f"Removed {original_len - len(df)} duplicate timestamps.")
+
 
     st.info(f"Total unique daily candles after sorting and deduplication: {len(df)}")
 
     # Select the 'close' price and take the last 'num_days' requested
+    # We need to take the LAST N days *after* fetching everything and sorting
     historical_data_close = df['close'].tail(num_days)
 
     if len(historical_data_close) < num_days:
@@ -198,14 +214,12 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
 if st.button("Run Simulation"):
 
     # --- Fetch Historical Data ---
-    # Use the helper function to fetch potentially large history
-    # The helper function now handles retries and pagination
     historical_data_close_analyzed = fetch_historical_ohlcv(
         exchange_id=exchange_id,
         ticker=ticker,
         timeframe='1d', # Daily timeframe
         num_days=historical_days_requested,
-        limit_per_call=1000 # Max candles per API call. Some exchanges might have lower limits (e.g., 300, 500, 1000)
+        limit_per_call=1000 # Max candles per API call. Some exchanges might have lower limits (e.g., 300, 500)
     )
 
     # Ensure we have enough data AFTER the fetch attempts
@@ -295,20 +309,11 @@ if st.button("Run Simulation"):
                     simulated_price_path[0] = start_price
 
                     # Apply returns up to the number of generated dates/steps
-                    # Index j goes from 1 to sim_path_length - 1
-                    # Index j-1 goes from 0 to sim_path_length - 2
-                    # The returns array has length simulation_days.
-                    # This works correctly even if sim_path_length < simulation_days + 1 (due to date generation issue)
-                    # As it only uses returns up to the number of available steps.
                     for j in range(1, sim_path_length):
-                         # Make sure we don't go out of bounds of the simulated_log_returns array
-                         # This check is theoretically redundant if sim_path_length matches len(simulated_dates)+1
-                         # but defensive coding against potential minor off-by-one issues.
                          if j - 1 < len(simulated_log_returns):
                               simulated_price_path[j] = simulated_price_path[j-1] * np.exp(simulated_log_returns[j-1])
                          else:
-                              # Should not happen if lengths are consistent, but fill with last valid price if it does
-                              simulated_price_path[j] = simulated_price_path[j-1]
+                              simulated_price_path[j] = simulated_price_path[j-1] # Use last price if somehow runs out of returns
 
 
                 all_simulated_paths.append(simulated_price_path)
@@ -327,25 +332,20 @@ if st.button("Run Simulation"):
     if len(all_simulated_paths) > 0 and sim_path_length > 0 and all(len(path) == sim_path_length for path in all_simulated_paths):
         try:
             all_simulated_paths_np = np.vstack(all_simulated_paths) # Stack rows vertically
-            # Now transpose to have prices at each step in columns
             prices_at_each_step = all_simulated_paths_np.T # Transpose
 
-            # Calculate median, mean, std dev for each step (column)
             median_prices = np.median(prices_at_each_step, axis=1)
             mean_prices = np.mean(prices_at_each_step, axis=1)
             std_dev_prices = np.std(prices_at_each_step, axis=1)
 
-            # Calculate +/- 1 standard deviation band
             upper_band = mean_prices + std_dev_prices
             lower_band = mean_prices - std_dev_prices
 
-            # Extract final prices for overview summary
             final_prices = [path[-1] for path in all_simulated_paths]
 
 
         except Exception as e:
             st.error(f"Error calculating aggregate statistics: {e}")
-            # Keep aggregates as empty arrays if calculation fails
 
 
     elif len(all_simulated_paths) > 0:
@@ -366,7 +366,6 @@ if st.button("Run Simulation"):
         st.warning("No historical data available to plot.")
 
     # Plot Aggregated Simulated Data (Median and Band)
-    # Ensure all necessary arrays for plotting aggregates have the correct length
     if len(plot_sim_dates) > 0 and len(median_prices) == len(plot_sim_dates) and len(upper_band) == len(plot_sim_dates) and len(lower_band) == len(plot_sim_dates):
         # Plot Median Line
         ax.plot(plot_sim_dates, median_prices, label=f'Median Simulated Price ({num_simulations} runs)', color='red', linestyle='-', linewidth=2)
@@ -375,31 +374,18 @@ if st.button("Run Simulation"):
         ax.fill_between(plot_sim_dates, lower_band, upper_band, color='orange', alpha=0.3, label='+/- 1 Std Dev Band')
 
         # --- Add Labels at the end ---
-        # Check if plot_sim_dates has at least one point to label (should be > 0 if we are here)
         if len(plot_sim_dates) > 0:
              final_date = plot_sim_dates[-1]
 
-             # Median label
              ax.text(final_date, median_prices[-1], f" ${median_prices[-1]:.2f}",
                      color='red', fontsize=10, ha='left', va='center', weight='bold')
 
-             # Upper band label
              ax.text(final_date, upper_band[-1], f" ${upper_band[-1]:.2f}",
                      color='darkorange', fontsize=9, ha='left', va='bottom')
 
-             # Lower band label
              ax.text(final_date, lower_band[-1], f" ${lower_band[-1]:.2f}",
                      color='darkorange', fontsize=9, ha='left', va='top')
 
-             # Optional: Add a horizontal line for the historical closing price on the simulation side
-             # if len(historical_data_close_analyzed) > 0:
-             #      last_hist_price = historical_data_close_analyzed.iloc[-1]
-             #      # Need the x-coordinate of the start of the simulation for the horizontal line
-             #      sim_start_x = plot_sim_dates[0]
-             #      ax.hlines(last_hist_price, xmin=sim_start_x, xmax=final_date, color='gray', linestyle=':', linewidth=1, label='Last Historical Close')
-
-
-        # Add legend if simulation aggregates were plotted
         ax.legend()
 
     elif len(all_simulated_paths) > 0:
@@ -413,14 +399,11 @@ if st.button("Run Simulation"):
     ax.set_ylabel('Price ($)')
     ax.grid(True)
 
-    # Use Streamlit's plotting function
     try:
         st.pyplot(fig)
     except Exception as e:
         st.error(f"Error generating plot: {e}")
-        st.error("This error might still be related to date formatting within Matplotlib. Check console logs.")
 
-    # Close the figure to prevent memory leaks
     plt.close(fig)
 
     # --- Display Final Results ---
@@ -428,16 +411,16 @@ if st.button("Run Simulation"):
     if len(historical_data_close_analyzed) > 0:
         st.write(f"**Last Historical Price** ({historical_data_close_analyzed.index[-1].strftime('%Y-%m-%d')}): **${historical_data_close_analyzed.iloc[-1]:.2f}**")
 
-    if len(median_prices) > 0: # Check if aggregates were calculated
+    if len(median_prices) > 0:
          st.write(f"Ran **{num_simulations}** simulations.")
-         if len(simulated_dates) > 0 and len(median_prices) > 0: # Final check for data availability
+         if len(simulated_dates) > 0 and len(median_prices) > 0:
               st.write(f"Simulated Ending Prices (after {len(simulated_dates)} steps, {simulated_dates[-1].strftime('%Y-%m-%d')}):")
               st.write(f"- Median: **${median_prices[-1]:.2f}**")
               st.write(f"- Mean: ${mean_prices[-1]:.2f}")
               st.write(f"- Std Dev: ${std_dev_prices[-1]:.2f}")
               st.write(f"- +/- 1 Std Dev Range: [${lower_band[-1]:.2f}, ${upper_band[-1]:.2f}]")
 
-              if final_prices: # Check if the list of final prices was populated
+              if final_prices:
                   st.write(f"- Actual Min Ending Price: ${np.min(final_prices):.2f}")
                   st.write(f"- Actual Max Ending Price: ${np.max(final_prices):.2f}")
               else:
@@ -446,7 +429,7 @@ if st.button("Run Simulation"):
          else:
               st.warning("Simulated dates or median prices were not generated successfully.")
 
-    elif len(all_simulated_paths) > 0: # means aggregation failed
+    elif len(all_simulated_paths) > 0:
         st.warning("Simulation paths were generated, but aggregation failed.")
     else:
          st.warning("No simulation results to display.")
