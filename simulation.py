@@ -14,7 +14,7 @@ st.write("Simulate future crypto price movements using a random walk based on hi
 # --- Input Parameters ---
 st.sidebar.header("Simulation Settings")
 
-# Use Coinbase as the exchange ID as requested
+# Use Coinbase as the exchange ID as requested, but add note
 exchange_id = 'coinbase' # <-- Changed from 'coinbasepro'
 st.sidebar.write(f"Using exchange: **{exchange_id}**")
 
@@ -26,8 +26,8 @@ historical_days = st.sidebar.number_input("Historical Trading Days for Analysis"
 simulation_days = st.sidebar.number_input("Future Simulation Days", min_value=1, value=30, step=1)
 
 st.sidebar.write("Data fetched using CCXT. Public data access typically does not require an API key.")
-st.sidebar.write("Free data sources may have rate limits.")
-st.sidebar.write("Note: 'coinbasepro' is often recommended over 'coinbase' for trading data if available.")
+st.sidebar.write("Free data sources may have rate limits or data availability issues.")
+st.sidebar.write("Note: The `coinbasepro` exchange ID in CCXT is generally better supported for trading data like OHLCV compared to `coinbase`.")
 
 
 # --- Main Simulation Logic (triggered by button) ---
@@ -37,8 +37,8 @@ if st.button("Run Simulation"):
     try:
         # Initialize the exchange
         exchange = getattr(ccxt, exchange_id)()
-        # Set timeout if needed, though not strictly necessary for public data
-        # exchange.timeout = 10000 # 10 seconds
+        # Load markets to ensure everything is set up
+        exchange.load_markets()
     except AttributeError:
         st.error(f"Exchange '{exchange_id}' not found. Please check the exchange ID.")
         st.stop()
@@ -46,16 +46,22 @@ if st.button("Run Simulation"):
         st.error(f"Could not initialize exchange '{exchange_id}': {e}")
         st.stop()
 
-    # Ensure the exchange supports fetching OHLCV data
-    # Not all exchanges support fetchOHLCV, especially older APIs like potentially 'coinbase'
-    # Although CCXT tries to abstract, let's check dynamically
+    # Ensure the exchange supports fetching OHLCV data for the specific ticker
     if not exchange.has or not exchange.has.get('fetchOHLCV'):
          st.error(f"Exchange '{exchange_id}' does not support fetching OHLCV data (fetchOHLCV).")
          st.stop()
 
+    # Check if the ticker exists and supports the timeframe
+    if ticker not in exchange.markets:
+         st.error(f"Trading pair '{ticker}' not found on exchange '{exchange_id}'.")
+         st.stop()
 
     # Define the timeframe (daily)
     timeframe = '1d'
+    if timeframe not in exchange.timeframes:
+        st.error(f"Timeframe '{timeframe}' is not supported by exchange '{exchange_id}' for ticker '{ticker}'.")
+        st.stop()
+
 
     with st.spinner(f"Fetching historical data for {ticker} from {exchange_id}..."):
         try:
@@ -72,29 +78,30 @@ if st.button("Run Simulation"):
             # Convert to pandas DataFrame
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
-            # --- CRITICAL CHANGE: Try different timestamp unit ---
-            # CCXT timestamps are typically milliseconds, but older APIs like 'coinbase' might be seconds.
-            # The matplotlib error suggests a date way out of bounds, likely from wrong timestamp unit.
-            try:
-                 # Assume milliseconds first (standard CCXT)
-                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                 # Quick check if resulting dates are reasonable (e.g., not year 1970 or 50000)
-                 if df['timestamp'].min().year < 1990 or df['timestamp'].max().year > datetime.now().year + 10:
-                     st.warning("Timestamps from 'ms' conversion look unusual. Trying 's' (seconds).")
-                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                     if df['timestamp'].min().year < 1990 or df['timestamp'].max().year > datetime.now().year + 10:
-                          st.error("Timestamp conversion resulted in unreasonable dates even with 's'. Data might be corrupted or in an unexpected format.")
-                          st.stop()
-            except Exception as ts_error:
-                 st.error(f"Error converting timestamp: {ts_error}. Trying 's' (seconds).")
+            # --- IMPROVED TIMESTAMP CONVERSION ---
+            # Inspect first few raw timestamps to guess the unit
+            st.info(f"First 5 raw timestamps: {[ts for ts in df['timestamp'].head().tolist()]}")
+
+            # Attempt conversion, trying milliseconds first, then seconds
+            converted = False
+            for unit in ['ms', 's']:
                  try:
-                      df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                      if df['timestamp'].min().year < 1990 or df['timestamp'].max().year > datetime.now().year + 10:
-                           st.error("Timestamp conversion resulted in unreasonable dates even with 's'. Data might be corrupted or in an unexpected format.")
-                           st.stop()
-                 except Exception as ts_error_s:
-                      st.error(f"Error converting timestamp with 's': {ts_error_s}. Could not parse timestamps correctly.")
-                      st.stop()
+                      df['timestamp_dt'] = pd.to_datetime(df['timestamp'], unit=unit)
+                      # Check if dates are reasonable (e.g., after 1990 and not too far in future)
+                      if df['timestamp_dt'].min().year >= 1990 and df['timestamp_dt'].max().year <= datetime.now().year + 2:
+                           st.success(f"Successfully converted timestamps using unit='{unit}'. Dates look reasonable.")
+                           df['timestamp'] = df['timestamp_dt'] # Overwrite the original timestamp column with datetime objects
+                           converted = True
+                           break # Found a working unit, exit loop
+                      else:
+                          # Dates are outside expected range, this unit probably isn't right
+                          st.warning(f"Conversion with unit='{unit}' resulted in unusual dates ({df['timestamp_dt'].min().date()} to {df['timestamp_dt'].max().date()}). Trying next unit.")
+                 except Exception as ts_error:
+                      st.warning(f"Conversion with unit='{unit}' failed: {ts_error}. Trying next unit.")
+
+            if not converted:
+                 st.error("Failed to convert timestamps to valid dates using 'ms' or 's'. Data format might be unexpected.")
+                 st.stop()
 
             df.set_index('timestamp', inplace=True)
 
@@ -109,7 +116,7 @@ if st.button("Run Simulation"):
                 historical_data_close_analyzed = historical_data_close.tail(historical_days)
 
             if historical_data_close_analyzed.empty or len(historical_data_close_analyzed) < 2:
-                 st.error(f"Not enough historical data ({len(historical_data_close_analyzed)} days) available or parsed for analysis after filtering. Need at least 2 days.")
+                 st.error(f"Not enough historical data ({len(historical_data_close_analyzed)} days) available or parsed for analysis after filtering. Need at least 2 days with valid prices.")
                  st.stop()
 
         except ccxt.BaseError as e:
@@ -125,8 +132,8 @@ if st.button("Run Simulation"):
         log_returns = np.log(historical_data_close_analyzed / historical_data_close_analyzed.shift(1)).dropna()
 
         # Check if enough data remained after calculating returns
-        if log_returns.empty:
-            st.error("Not enough valid historical data (need at least 2 days with non-zero prices) to calculate returns and volatility.")
+        if len(log_returns) < 1: # Need at least one return to calculate mean/std
+            st.error(f"Not enough valid historical data ({len(historical_data_close_analyzed)} prices) to calculate returns and volatility after cleaning. Need at least 2 consecutive valid prices.")
             st.stop()
 
         mean_daily_log_return = log_returns.mean()
@@ -157,40 +164,52 @@ if st.button("Run Simulation"):
 
     # --- Prepare Dates for Plotting ---
     historical_dates = historical_data_close_analyzed.index
-    last_historical_date = historical_dates.max() # Use max() in case sorting was weird, though index should be sorted
+    last_historical_date = historical_dates.max()
 
     # Generate future dates for the simulation, starting after the last historical date
     # Crypto markets are 24/7, but using 'B' (business days) aligns better with stock charts visually.
-    simulated_dates = pd.date_range(start=last_historical_date, periods=simulation_days + 1, freq='B')[1:] # [1:] excludes start date
+    # Let's handle potential index issues more robustly
+    try:
+        simulated_dates = pd.date_range(start=last_historical_date, periods=simulation_days + 1, freq='B')[1:]
+         # Ensure the length is correct
+        if len(simulated_dates) != simulation_days:
+             st.warning(f"Could not generate exactly {simulation_days} business days after {last_historical_date.strftime('%Y-%m-%d')}. Generated {len(simulated_dates)}. Trimming simulation results.")
+             # Trim simulation data if dates couldn't be generated
+             simulated_price_path = simulated_price_path[:len(simulated_dates) + 1]
+             if len(simulated_price_path) > 0:
+                  st.warning(f"Simulated price path trimmed to length {len(simulated_price_path)}.")
 
-
-    # Ensure simulated dates match simulation steps length
-    # This can happen if the period spans holidays that pandas doesn't recognize as 'business' days,
-    # or if the simulation days span a very large period.
-    if len(simulated_dates) != simulation_days:
-         st.warning(f"Could not generate exactly {simulation_days} business days after {last_historical_date.strftime('%Y-%m-%d')}. Generated {len(simulated_dates)}. Trimming simulation results.")
-         # Trim simulation data if dates couldn't be generated
-         simulated_price_path = simulated_price_path[:len(simulated_dates) + 1]
+    except Exception as date_range_error:
+         st.error(f"Error generating future dates: {date_range_error}. Cannot plot simulation.")
+         # Set simulated dates and path to empty so plotting is skipped or handled gracefully
+         simulated_dates = pd.DatetimeIndex([])
+         simulated_price_path = np.array([])
 
 
     # --- Plotting ---
     st.subheader("Price Chart: Historical and Simulated")
 
-    # Use matplotlib.use('Agg') if running in environments without a display, though Streamlit handles this well.
     fig, ax = plt.subplots(figsize=(14, 7))
 
     # Plot Historical Data
-    ax.plot(historical_dates, historical_data_close_analyzed, label=f'Historical {ticker} Price', color='blue')
+    if not historical_data_close_analyzed.empty:
+        ax.plot(historical_dates, historical_data_close_analyzed, label=f'Historical {ticker} Price', color='blue')
+    else:
+        st.warning("No historical data available to plot.")
+
 
     # Plot Simulated Data
-    # The x-axis for the simulated path includes the last historical date + the future simulated dates
-    plot_sim_dates = np.concatenate(([last_historical_date], simulated_dates))
+    if len(simulated_dates) > 0 and len(simulated_price_path) > 1: # Need at least 2 points to draw a line
+        # The x-axis for the simulated path includes the last historical date + the future simulated dates
+        plot_sim_dates = np.concatenate(([last_historical_date], simulated_dates))
 
-    if len(plot_sim_dates) == len(simulated_price_path):
-         ax.plot(plot_sim_dates, simulated_price_path, label=f'Simulated Future Price ({len(simulated_dates)} days)', color='red', linestyle='--')
-    else:
-         st.error("Error plotting simulation: Date and price length mismatch.")
-         st.write(f"Plot dates length: {len(plot_sim_dates)}, Simulated prices length: {len(simulated_price_path)}")
+        if len(plot_sim_dates) == len(simulated_price_path):
+             ax.plot(plot_sim_dates, simulated_price_path, label=f'Simulated Future Price ({len(simulated_dates)} days)', color='red', linestyle='--')
+        else:
+             st.error("Error plotting simulation: Date and price length mismatch. Skipping simulation plot.")
+             st.write(f"Plot dates length: {len(plot_sim_dates)}, Simulated prices length: {len(simulated_price_path)}")
+    elif len(simulated_dates) > 0 or len(simulated_price_path) > 0:
+         st.warning("Not enough data points generated for simulation plot.")
 
 
     ax.set_title(f'{ticker} Price: Historical Data ({exchange_id}) and Random Walk Simulation')
@@ -209,8 +228,7 @@ if st.button("Run Simulation"):
     st.subheader("Simulation Results")
     if len(historical_data_close_analyzed) > 0:
         st.write(f"**Last Historical Price** ({historical_dates[-1].strftime('%Y-%m-%d')}): **${last_price:.2f}**")
-    if len(simulated_dates) > 0:
+    if len(simulated_dates) > 0 and len(simulated_price_path) > 0: # Check if simulation ran successfully
          st.write(f"**Simulated Price** after {len(simulated_dates)} steps ({simulated_dates[-1].strftime('%Y-%m-%d')}): **${simulated_price_path[-1]:.2f}**")
     else:
-         st.warning("No simulated dates or prices were generated.")
-        
+         st.warning("No simulated results to display.")
