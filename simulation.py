@@ -10,7 +10,7 @@ import math
 # --- Streamlit App Configuration ---
 st.set_page_config(page_title="Market Random Walk Simulation (yfinance)", layout="wide")
 
-st.title("Market Price Random Walk Simulation")
+#st.title("Market Price Random Walk Simulation")
 st.write("Simulate multiple future price movements using random walks based on historical volatility, using free data via yfinance.")
 
 # --- Initialize Session State for Simulation Results ---
@@ -45,7 +45,7 @@ def fetch_historical_data(ticker, num_days):
     using yfinance. Returns a pandas Series of closing prices with datetime index.
     Includes basic filtering for positive prices.
     """
-    st.info(f"Fetching historical data for {ticker} to cover at least {num_days} days...")
+    #st.info(f"Fetching historical data for {ticker} to cover at least {num_days} days...")
 
     # Determine start date: go back enough calendar days to cover num_days *trading* days
     # Using 2x as a conservative estimate for stocks (approx 252 trading days/year)
@@ -77,7 +77,7 @@ def fetch_historical_data(ticker, num_days):
         # Return the full fetched & filtered Series.
         # We will take the tail for analysis *and* display *after* fetching.
         # This allows the slider to control the display tail without re-fetching the whole period.
-        st.success(f"Successfully fetched {len(historical_data_close)} trading days.")
+        #st.success(f"Successfully fetched {len(historical_data_close)} trading days.")
         return historical_data_close # Return the full Series here
 
 
@@ -486,7 +486,7 @@ if st.button("Run Simulation"):
         'risk_reward_ratio': risk_reward_ratio, # Store sidebar values
         'num_simulations_ran': num_simulations, # Store number of sims run for display
     }
-    st.success("Simulation completed and results stored.")
+    #st.success("Simulation completed and results stored.")
     # Note: Streamlit will automatically rerun the script after this block finishes.
 
 
