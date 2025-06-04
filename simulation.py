@@ -35,10 +35,6 @@ num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_va
 st.sidebar.write("Data fetched using yfinance (Yahoo Finance).")
 st.sidebar.write("Note: Yahoo Finance data may have occasional inaccuracies or downtime.")
 
-# --- Sidebar Results Display Area ---
-st.sidebar.header("Simulation Insights")
-sidebar_placeholder = st.sidebar.empty() # Create a placeholder to update results
-
 
 # --- Helper function to fetch historical data using yfinance ---
 # Cached function: runs only when ticker or historical_days_requested changes
@@ -164,6 +160,12 @@ historical_days_to_display = st.sidebar.slider(
     step=10,
     help="Slide to change the number of historical trading days shown on the chart. Does not affect analysis period."
 )
+
+
+# --- Sidebar Results Display Area ---
+st.sidebar.header("Simulation Insights")
+sidebar_placeholder = st.sidebar.empty() # Create a placeholder to update results
+
 
 
 # --- Define the plotting function ---
