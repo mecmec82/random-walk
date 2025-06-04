@@ -8,7 +8,7 @@ import time
 import math
 
 # --- Streamlit App Configuration ---
-st.set_page_config(page_title="Market Random Walk Simulation (yfinance)", layout="wide")
+st.set_page_config(page_title="Market Random Walk Simulation (yfinance Debug)", layout="wide")
 
 st.title("Market Price Random Walk Simulation")
 st.write("Simulate multiple future price movements using random walks based on historical volatility, using free data via yfinance.")
@@ -72,6 +72,14 @@ def fetch_historical_data(ticker, num_days):
              st.warning(f"Only {len(historical_data_close_analyzed)} trading days available for analysis after fetching, filtering, and selecting the last {num_days} days.")
         else:
              st.success(f"Successfully fetched {len(historical_data_close_analyzed)} trading days for analysis.")
+
+        # --- DEBUGGING: Print last 5 rows of the data used for analysis ---
+        st.subheader("Historical Data Used for Analysis (Last 5 rows):")
+        if not historical_data_close_analyzed.empty:
+             st.dataframe(historical_data_close_analyzed.tail(5))
+        else:
+             st.warning("Historical data is empty after filtering.")
+        # --- END DEBUGGING ---
 
 
         return historical_data_close_analyzed
@@ -223,10 +231,6 @@ if st.button("Run Simulation"):
     if len(all_simulated_paths) > 0 and sim_path_length > 0 and all(len(path) == sim_path_length for path in all_simulated_paths):
         try:
             all_simulated_paths_np = np.vstack(all_simulated_paths) # Stack rows vertically
-            # Filter out any columns (time steps) that contain NaNs across all simulations before calculating stats
-            # This ensures stats are calculated only where all simulations have valid data up to that point
-            # Or, just calculate stats and let NaN propagate. Let's let NaN propagate for simplicity first.
-
             prices_at_each_step = all_simulated_paths_np.T # Transpose
 
             # Calculate median, mean, std dev for each step (column) - np functions handle NaNs (e.g., median ignores, mean results in NaN)
@@ -236,38 +240,30 @@ if st.button("Run Simulation"):
             std_dev_prices = np.nanstd(prices_at_each_step, axis=1)
 
             # Check if the resulting aggregates are finite before creating bands/labels
-            if not np.isfinite(median_prices).all() or not np.isfinite(mean_prices).all() or not np.isfinite(std_dev_prices).all():
-                 st.warning("Calculated simulation aggregates contain non-finite values (NaN or Inf). This can happen if many simulation paths diverged.")
-                 # We can choose to stop here or plot the finite parts. Let's continue and handle NaNs in plotting.
-                 # Filter out non-finite points for plotting the band
-                 valid_agg_points = np.isfinite(mean_prices) & np.isfinite(std_dev_prices) & np.isfinite(median_prices)
-                 if not valid_agg_points.any():
-                      st.error("No finite aggregate simulation data points available to plot band or median line.")
-                      median_prices = np.array([]) # Clear for plotting check
-                      upper_band = np.array([])
-                      lower_band = np.array([])
-                 else:
-                     # Only calculate band for valid points
-                     upper_band = mean_prices + std_dev_prices
-                     lower_band = mean_prices - std_dev_prices
-                     # Need to handle NaNs in upper/lower band if mean/std were NaN
-                     upper_band[~valid_agg_points] = np.nan
-                     lower_band[~valid_agg_points] = np.nan
-
-
-            else: # All aggregates are finite
-                # Calculate +/- 1 standard deviation band
+            valid_agg_points = np.isfinite(mean_prices) & np.isfinite(std_dev_prices) & np.isfinite(median_prices)
+            if not valid_agg_points.any():
+                 st.warning("Calculated simulation aggregates contain non-finite values (NaN or Inf) for all steps. This can happen if many simulation paths diverged early.")
+                 # Ensure all aggregate arrays reflect the non-finite status
+                 median_prices[:] = np.nan
+                 mean_prices[:] = np.nan
+                 std_dev_prices[:] = np.nan
+                 upper_band = np.array([])
+                 lower_band = np.array([]) # Clear bands if no valid points
+            else:
+                # Only calculate band for valid points
                 upper_band = mean_prices + std_dev_prices
                 lower_band = mean_prices - std_dev_prices
+                # Need to handle NaNs in upper/lower band if mean/std were NaN
+                upper_band[~valid_agg_points] = np.nan
+                lower_band[~valid_agg_points] = np.nan
 
-
-            # Extract final prices for overview summary (only valid ones)
-            final_prices = [path[-1] for path in all_simulated_paths if np.isfinite(path[-1])]
+                # Extract final prices for overview summary (only valid ones)
+                final_prices = [path[-1] for path in all_simulated_paths if np.isfinite(path[-1])]
 
 
         except Exception as e:
             st.error(f"Error calculating aggregate statistics: {e}")
-            # Keep aggregates as empty arrays if calculation fails
+            # Keep aggregates as empty/NaN arrays if calculation fails
 
 
     elif len(all_simulated_paths) > 0:
@@ -289,16 +285,19 @@ if st.button("Run Simulation"):
 
     # Plot Aggregated Simulated Data (Median and Band)
     # Ensure we have dates for plotting and that median_prices is not empty/all NaN
-    if len(plot_sim_dates) > 0 and len(median_prices) > 0 and np.isfinite(median_prices).any():
-         # Filter out NaN values for plotting
-         valid_plot_indices = np.isfinite(median_prices) # Apply same check for upper/lower band implicitly
+    # Plot if plot_sim_dates is available AND there is at least one finite point in median_prices
+    if len(plot_sim_dates) > 0 and len(median_prices) == len(plot_sim_dates) and np.isfinite(median_prices).any():
+
+         # Filter out NaN values for plotting. Need to filter all relevant arrays based on valid median points.
+         valid_plot_indices = np.isfinite(median_prices) # This should align with valid_agg_points from calculation
          plot_sim_dates_valid = plot_sim_dates[valid_plot_indices]
          median_prices_valid = median_prices[valid_plot_indices]
-         upper_band_valid = upper_band[valid_plot_indices]
-         lower_band_valid = lower_band[valid_plot_indices]
+         # Filter bands based on the same indices
+         upper_band_valid = upper_band[valid_plot_indices] if len(upper_band) == len(median_prices) else np.array([])
+         lower_band_valid = lower_band[valid_plot_indices] if len(lower_band) == len(median_prices) else np.array([])
 
 
-         if len(plot_sim_dates_valid) > 0: # Check if any valid points remain
+         if len(plot_sim_dates_valid) > 0: # Check if any valid points remain for plotting the line/fill
             # Plot Median Line (only valid points)
             ax.plot(plot_sim_dates_valid, median_prices_valid, label=f'Median Simulated Price ({num_simulations} runs)', color='red', linestyle='-', linewidth=2)
 
@@ -306,36 +305,37 @@ if st.button("Run Simulation"):
             if len(upper_band_valid) == len(plot_sim_dates_valid) and len(lower_band_valid) == len(plot_sim_dates_valid):
                  ax.fill_between(plot_sim_dates_valid, lower_band_valid, upper_band_valid, color='orange', alpha=0.3, label='+/- 1 Std Dev Band')
             else:
-                 st.warning("Length mismatch for plotting valid std dev band segments.")
+                 # This case should ideally be caught by the check above the main plotting block, but defensive here
+                 st.warning("Length mismatch for plotting valid std dev band segments. Band will not be plotted.")
 
 
             # --- Add Labels at the end ---
-            # Only add labels if the *last* point is valid
+            # Only add labels if the *last* point in the *original* median/band arrays is finite
             if np.isfinite(median_prices[-1]):
-                 final_date = plot_sim_dates[-1] # Use the actual last date index point
+                 final_date = plot_sim_dates[-1] # Use the actual last date index point (even if median is NaN there, the date exists)
 
                  # Median label
                  ax.text(final_date, median_prices[-1], f" ${median_prices[-1]:.2f}",
                          color='red', fontsize=10, ha='left', va='center', weight='bold')
 
                  # Upper band label (only if last point is valid)
-                 if np.isfinite(upper_band[-1]):
+                 if len(upper_band) > 0 and np.isfinite(upper_band[-1]): # Check if upper_band exists and last value is finite
                       ax.text(final_date, upper_band[-1], f" ${upper_band[-1]:.2f}",
                               color='darkorange', fontsize=9, ha='left', va='bottom')
 
                  # Lower band label (only if last point is valid)
-                 if np.isfinite(lower_band[-1]):
+                 if len(lower_band) > 0 and np.isfinite(lower_band[-1]): # Check if lower_band exists and last value is finite
                        ax.text(final_date, lower_band[-1], f" ${lower_band[-1]:.2f}",
                               color='darkorange', fontsize=9, ha='left', va='top')
 
             else:
-                st.warning("Last simulated data point is not finite, skipping end labels.")
+                st.warning("Last simulated data point in median is not finite, skipping end labels.")
 
 
             # Add legend if simulation aggregates were plotted
             ax.legend()
          else:
-              st.warning("No finite aggregate simulation data points available to plot.")
+              st.warning("No finite aggregate simulation data points available to plot the median line/band.")
 
 
     elif len(all_simulated_paths) > 0: # Paths were generated, but aggregates couldn't be plotted or were all NaN/inf
@@ -361,18 +361,18 @@ if st.button("Run Simulation"):
     if len(historical_data_close_analyzed) > 0:
         st.write(f"**Last Historical Price** ({historical_data_close_analyzed.index[-1].strftime('%Y-%m-%d')}): **${historical_data_close_analyzed.iloc[-1]:.2f}**")
 
-    # Display final results only if aggregates were successfully calculated and are finite at the end
+    # Display final results only if median was successfully calculated and is finite at the end
     if len(median_prices) > 0 and np.isfinite(median_prices[-1]):
          st.write(f"Ran **{num_simulations}** simulations.")
-         if len(simulated_dates) > 0 and len(median_prices) > 0:
+         if len(simulated_dates) > 0: # Final check for data availability
               st.write(f"Simulated Ending Prices (after {len(simulated_dates)} steps, {simulated_dates[-1].strftime('%Y-%m-%d')}):")
               st.write(f"- Median: **${median_prices[-1]:.2f}**")
               # Only display mean/std dev/range if they are finite at the end
-              if np.isfinite(mean_prices[-1]):
+              if len(mean_prices) > 0 and np.isfinite(mean_prices[-1]):
                    st.write(f"- Mean: ${mean_prices[-1]:.2f}")
-              if np.isfinite(std_dev_prices[-1]):
+              if len(std_dev_prices) > 0 and np.isfinite(std_dev_prices[-1]):
                    st.write(f"- Std Dev: ${std_dev_prices[-1]:.2f}")
-              if np.isfinite(lower_band[-1]) and np.isfinite(upper_band[-1]):
+              if len(lower_band) > 0 and len(upper_band) > 0 and np.isfinite(lower_band[-1]) and np.isfinite(upper_band[-1]):
                    st.write(f"- +/- 1 Std Dev Range: [${lower_band[-1]:.2f}, ${upper_band[-1]:.2f}]")
               else:
                    st.warning("Ending Std Dev band values are non-finite.")
@@ -385,7 +385,7 @@ if st.button("Run Simulation"):
                    st.warning("No finite final prices from simulated paths to calculate min/max.")
 
          else:
-              st.warning("Simulated dates or median prices were not generated successfully.")
+              st.warning("Simulated dates were not generated successfully.")
 
     elif len(all_simulated_paths) > 0:
         st.warning("Simulation paths were generated, but ending aggregate statistics are non-finite.")
