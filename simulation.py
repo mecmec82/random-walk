@@ -14,18 +14,19 @@ st.write("Simulate multiple future crypto price movements using random walks and
 # --- Input Parameters ---
 st.sidebar.header("Simulation Settings")
 
-exchange_id = 'coinbase' # Using 'coinbase' as requested
+exchange_id = st.sidebar.selectbox("Select Exchange", ['coinbase', 'coinbasepro'], index=0) # Added exchange selection
 st.sidebar.write(f"Using exchange: **{exchange_id}**")
+
 
 ticker = st.sidebar.text_input("Trading Pair (e.g., BTC/USD)", 'BTC/USD').upper()
 
 historical_days = st.sidebar.number_input("Historical Trading Days for Analysis", min_value=50, value=300, step=10)
 simulation_days = st.sidebar.number_input("Future Simulation Days", min_value=1, value=30, step=1)
-num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_value=1, value=20, step=1) # Number of simulations
+num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_value=1, value=100, step=10) # Increased default for better stats
 
 st.sidebar.write("Data fetched using CCXT. Public data access typically does not require an API key.")
 st.sidebar.write("Free data sources may have rate limits or data availability issues.")
-st.sidebar.write("Note: The `coinbasepro` exchange ID in CCXT is generally better supported for trading data like OHLCV compared to `coinbase`.")
+st.sidebar.write("Note: `coinbasepro` is often better supported for trading data than `coinbase`.")
 
 
 # --- Main Simulation Logic (triggered by button) ---
@@ -64,7 +65,7 @@ if st.button("Run Simulation"):
     with st.spinner(f"Fetching historical data for {ticker} from {exchange_id}..."):
         try:
             # Fetch OHLCV data
-            ohlcv = exchange.fetch_ohlcv(ticker, timeframe, limit=1000) # Fetch up to 1000 candles
+            ohlcv = exchange.fetch_ohlcv(ticker, timeframe, limit=2000) # Increased limit slightly
 
             if not ohlcv:
                 st.error(f"No historical data fetched for {ticker} from {exchange_id}. Check ticker symbol or exchange status. Data might not be available via the public endpoint.")
@@ -82,7 +83,7 @@ if st.button("Run Simulation"):
                  if not temp_dt.isnull().any() and temp_dt.min().year >= 1990 and temp_dt.max().year <= datetime.now().year + 2:
                       df['timestamp_dt'] = temp_dt
                       converted = True
-            except Exception:
+             except Exception:
                  pass
 
             if not converted:
@@ -143,31 +144,28 @@ if st.button("Run Simulation"):
     last_historical_date = historical_dates.max()
 
     # Generate future dates for the simulation
-    simulated_dates = pd.DatetimeIndex([]) # Initialize as empty
+    simulated_dates = pd.DatetimeIndex([])
     try:
-        # Add 1 because the simulation path includes the starting point (last historical date)
-        # but pd.date_range starts *after* the given date with freq='B'
         simulated_dates = pd.date_range(start=last_historical_date, periods=simulation_days + 1, freq='B')[1:]
 
         if len(simulated_dates) != simulation_days:
              st.warning(f"Could not generate exactly {simulation_days} business days after {last_historical_date.strftime('%Y-%m-%d')}. Generated {len(simulated_dates)}. Simulation path length will be adjusted.")
-             # Trim simulation path length to match generated dates + start point
              sim_path_length = len(simulated_dates) + 1
         else:
              sim_path_length = simulation_days + 1
 
     except Exception as date_range_error:
          st.error(f"Error generating future dates for simulation: {date_range_error}. Cannot run simulation.")
-         simulated_dates = pd.DatetimeIndex([]) # Ensure it's empty on error
+         simulated_dates = pd.DatetimeIndex([])
          sim_path_length = 0
 
 
     # Combine historical last date with simulated dates for plotting the simulation paths
-    plot_sim_dates = pd.DatetimeIndex([]) # Initialize as empty
+    plot_sim_dates = pd.DatetimeIndex([])
     if len(simulated_dates) > 0:
         last_historical_date_index = pd.DatetimeIndex([last_historical_date])
         plot_sim_dates = last_historical_date_index.append(simulated_dates)
-        plot_sim_dates = pd.DatetimeIndex(plot_sim_dates) # Final check
+        plot_sim_dates = pd.DatetimeIndex(plot_sim_dates)
     else:
         st.warning("Skipping simulation date axis generation.")
 
@@ -178,22 +176,16 @@ if st.button("Run Simulation"):
         with st.spinner(f"Running {num_simulations} simulations for {simulation_days} days..."):
             start_price = historical_data_close_analyzed.iloc[-1]
             for _ in range(num_simulations):
-                 # Generate random daily log returns for this simulation path
                 simulated_log_returns = np.random.normal(
                     loc=mean_daily_log_return,
                     scale=daily_log_volatility,
-                    size=simulation_days # Always generate for the requested simulation_days
+                    size=simulation_days
                 )
 
-                # --- Calculate Simulated Price Path ---
-                simulated_price_path = np.zeros(sim_path_length) # Use the potentially trimmed length
+                simulated_price_path = np.zeros(sim_path_length)
                 if sim_path_length > 0:
                     simulated_price_path[0] = start_price
-
-                    # Only apply returns up to the number of generated dates
                     for j in range(1, sim_path_length):
-                        # Use the corresponding random return. Index is j-1 because returns array has length simulation_days.
-                        # This works even if sim_path_length < simulation_days + 1
                         simulated_price_path[j] = simulated_price_path[j-1] * np.exp(simulated_log_returns[j-1])
 
                 all_simulated_paths.append(simulated_price_path)
@@ -207,25 +199,23 @@ if st.button("Run Simulation"):
     upper_band = np.array([])
     lower_band = np.array([])
 
-    if len(all_simulated_paths) > 0 and len(all_simulated_paths[0]) > 0:
-        # Convert list of paths into a numpy array for easier column-wise operations
-        # Check that all paths have the same length before stacking
-        if all(len(path) == sim_path_length for path in all_simulated_paths):
-             all_simulated_paths_np = np.vstack(all_simulated_paths) # Stack rows vertically
-             # Now transpose to have prices at each step in columns
-             prices_at_each_step = all_simulated_paths_np.T # Transpose
+    if len(all_simulated_paths) > 0 and sim_path_length > 0 and all(len(path) == sim_path_length for path in all_simulated_paths):
+        try:
+            all_simulated_paths_np = np.vstack(all_simulated_paths)
+            prices_at_each_step = all_simulated_paths_np.T
 
-             # Calculate median, mean, std dev for each step (column)
-             median_prices = np.median(prices_at_each_step, axis=1)
-             mean_prices = np.mean(prices_at_each_step, axis=1)
-             std_dev_prices = np.std(prices_at_each_step, axis=1)
+            median_prices = np.median(prices_at_each_step, axis=1)
+            mean_prices = np.mean(prices_at_each_step, axis=1)
+            std_dev_prices = np.std(prices_at_each_step, axis=1)
 
-             # Calculate +/- 1 standard deviation band
-             upper_band = mean_prices + std_dev_prices
-             lower_band = mean_prices - std_dev_prices
+            upper_band = mean_prices + std_dev_prices
+            lower_band = mean_prices - std_dev_prices
 
-        else:
-             st.error("Simulation paths have inconsistent lengths. Cannot calculate aggregate statistics.")
+        except Exception as e:
+            st.error(f"Error calculating aggregate statistics: {e}")
+
+    elif len(all_simulated_paths) > 0:
+        st.error("Simulation paths have inconsistent lengths. Cannot calculate aggregate statistics.")
 
 
     # --- Plotting ---
@@ -245,16 +235,32 @@ if st.button("Run Simulation"):
         ax.plot(plot_sim_dates, median_prices, label=f'Median Simulated Price ({num_simulations} runs)', color='red', linestyle='-', linewidth=2)
 
         # Plot Standard Deviation Band
-        # Use the same x-axis (plot_sim_dates) for the band
         if len(upper_band) == len(plot_sim_dates) and len(lower_band) == len(plot_sim_dates):
              ax.fill_between(plot_sim_dates, lower_band, upper_band, color='orange', alpha=0.3, label='+/- 1 Std Dev Band')
+
+             # --- Add Labels at the end ---
+             final_date = plot_sim_dates[-1]
+
+             # Median label
+             ax.text(final_date, median_prices[-1], f" ${median_prices[-1]:.2f}",
+                     color='red', fontsize=10, ha='left', va='center', weight='bold')
+
+             # Upper band label
+             ax.text(final_date, upper_band[-1], f" ${upper_band[-1]:.2f}",
+                     color='darkorange', fontsize=9, ha='left', va='bottom') # va='bottom' places text slightly above the point
+
+             # Lower band label
+             ax.text(final_date, lower_band[-1], f" ${lower_band[-1]:.2f}",
+                     color='darkorange', fontsize=9, ha='left', va='top') # va='top' places text slightly below the point
+
+
         else:
              st.warning("Length mismatch for plotting std dev band.")
 
         # Add legend if simulation aggregates were plotted
         ax.legend()
 
-    elif len(all_simulated_paths) > 0: # Paths were generated, but aggregates couldn't be plotted
+    elif len(all_simulated_paths) > 0:
         st.warning("Could not plot simulation aggregates due to data length issues.")
     else:
         st.warning("No simulation data available to plot.")
@@ -280,20 +286,27 @@ if st.button("Run Simulation"):
     if len(historical_data_close_analyzed) > 0:
         st.write(f"**Last Historical Price** ({historical_data_close_analyzed.index[-1].strftime('%Y-%m-%d')}): **${historical_data_close_analyzed.iloc[-1]:.2f}**")
 
-    if len(median_prices) > 0: # Check if aggregates were calculated
+    if len(median_prices) > 0:
          st.write(f"Ran **{num_simulations}** simulations.")
-         # The last point in median_prices and the bands corresponds to the end date
-         st.write(f"Simulated Ending Prices (after {len(simulated_dates)} steps, {simulated_dates[-1].strftime('%Y-%m-%d')}):")
-         st.write(f"- Median: ${median_prices[-1]:.2f}")
-         st.write(f"- Mean: ${mean_prices[-1]:.2f}") # Also show mean for comparison
-         st.write(f"- Std Dev: ${std_dev_prices[-1]:.2f}")
-         st.write(f"- +/- 1 Std Dev Range: [${lower_band[-1]:.2f}, ${upper_band[-1]:.2f}]")
+         if len(simulated_dates) > 0:
+              st.write(f"Simulated Ending Prices (after {len(simulated_dates)} steps, {simulated_dates[-1].strftime('%Y-%m-%d')}):")
+              st.write(f"- Median: **${median_prices[-1]:.2f}**")
+              st.write(f"- Mean: ${mean_prices[-1]:.2f}")
+              st.write(f"- Std Dev: ${std_dev_prices[-1]:.2f}")
+              st.write(f"- +/- 1 Std Dev Range: [${lower_band[-1]:.2f}, ${upper_band[-1]:.2f}]")
 
-         # Could also calculate min/max from the actual simulated paths for the range
-         if len(all_simulated_paths) > 0 and len(all_simulated_paths[0]) > 0:
-             final_prices = [path[-1] for path in all_simulated_paths]
-             st.write(f"- Actual Min Ending Price: ${np.min(final_prices):.2f}")
-             st.write(f"- Actual Max Ending Price: ${np.max(final_prices):.2f}")
+              if len(all_simulated_paths) > 0 and len(all_simulated_paths[0]) > 0:
+                  final_prices = [path[-1] for path in all_simulated_paths if len(path) > 0]
+                  if final_prices: # Check if list is not empty
+                      st.write(f"- Actual Min Ending Price: ${np.min(final_prices):.2f}")
+                      st.write(f"- Actual Max Ending Price: ${np.max(final_prices):.2f}")
+              else:
+                   st.warning("Could not calculate min/max from simulated paths.")
 
+         else:
+              st.warning("Simulated dates were not generated successfully.")
+
+    elif len(all_simulated_paths) > 0: # means aggregation failed
+        st.warning("Simulation paths were generated, but aggregation failed.")
     else:
          st.warning("No simulation results to display.")
