@@ -8,7 +8,7 @@ import pandas as pd
 # --- Streamlit App Configuration ---
 st.set_page_config(page_title="Crypto Random Walk Simulation Debug", layout="wide")
 
-st.title("Crypto Price Random Walk Simulation (Debugging Dates)")
+st.title("Crypto Price Random Walk Simulation (Fixing Simulation Dates)")
 st.write("Simulate future crypto price movements using a random walk based on historical volatility, using free data via CCXT.")
 
 # --- Input Parameters ---
@@ -75,7 +75,7 @@ if st.button("Run Simulation"):
             # Convert to pandas DataFrame
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
-            # --- IMPROVED TIMESTAMP CONVERSION WITH MORE DEBUGGING ---
+            # --- IMPROVED TIMESTAMP CONVERSION WITH DEBUGGING ---
             st.info(f"Total fetched OHLCV rows: {len(df)}")
             st.info(f"First 5 raw timestamps from CCXT: {[ts for ts in df['timestamp'].head().tolist()]}")
 
@@ -93,7 +93,7 @@ if st.button("Run Simulation"):
                       converted = True
                       conversion_unit_used = 'ms'
                  else:
-                     st.warning(f"Conversion with unit='ms' resulted in unusual/invalid dates ({temp_dt.min()} to {temp_dt.max()}). Trying seconds.")
+                     st.warning(f"Conversion with unit='ms' resulted in unusual/invalid dates ({temp_dt.min().strftime('%Y-%m-%d')} to {temp_dt.max().strftime('%Y-%m-%d')}). Trying seconds.")
             except Exception as ts_error_ms:
                  st.warning(f"Conversion with unit='ms' failed: {ts_error_ms}. Trying seconds.")
 
@@ -107,7 +107,7 @@ if st.button("Run Simulation"):
                            converted = True
                            conversion_unit_used = 's'
                       else:
-                          st.warning(f"Conversion with unit='s' resulted in unusual/invalid dates ({temp_dt.min()} to {temp_dt.max()}).")
+                          st.warning(f"Conversion with unit='s' resulted in unusual/invalid dates ({temp_dt.min().strftime('%Y-%m-%d')} to {temp_dt.max().strftime('%Y-%m-%d')}).")
                  except Exception as ts_error_s:
                       st.warning(f"Conversion with unit='s' failed: {ts_error_s}.")
 
@@ -181,7 +181,7 @@ if st.button("Run Simulation"):
             st.success("Historical plot generated successfully.")
         except Exception as e:
             st.error(f"Error generating historical plot: {e}")
-            st.error("This is likely the date formatting issue. Check the 'Historical data index type' and 'Historical date range' messages above.")
+            st.error("This plot error is unexpected if the previous date checks passed. Double-check console logs.")
         plt.close(fig1)
     else:
         st.warning("No historical data available to plot.")
@@ -223,16 +223,24 @@ if st.button("Run Simulation"):
                  simulated_dates = pd.DatetimeIndex([])
                  simulated_price_path = np.array([])
 
+
             # --- Plotting Simulated Data Separately ---
             st.subheader("Plot 2: Simulated Future Price")
 
             if len(simulated_dates) > 0 and len(simulated_price_path) > 1: # Need at least 2 points to draw a line
                 fig2, ax2 = plt.subplots(figsize=(14, 7))
 
-                # The x-axis for the simulated path includes the last historical date + the future simulated dates
-                plot_sim_dates = np.concatenate(([last_historical_date], simulated_dates))
+                # --- CRITICAL CHANGE HERE ---
+                # Convert the single last_historical_date into a DatetimeIndex of length 1
+                last_historical_date_index = pd.DatetimeIndex([last_historical_date])
+                # Concatenate the single-element index with the simulated dates index
+                plot_sim_dates = last_historical_date_index.append(simulated_dates)
+
 
                 if len(plot_sim_dates) == len(simulated_price_path):
+                     # Ensure the index is a DatetimeIndex, though .append usually maintains this
+                     plot_sim_dates = pd.DatetimeIndex(plot_sim_dates) # belt-and-suspenders check
+
                      ax2.plot(plot_sim_dates, simulated_price_path, label=f'Simulated Future Price ({len(simulated_dates)} days)', color='red', linestyle='--')
                      ax2.set_title(f'{ticker} Price: Simulated Future Random Walk')
                      ax2.set_xlabel('Date')
@@ -244,7 +252,13 @@ if st.button("Run Simulation"):
                           st.success("Simulation plot generated successfully.")
                      except Exception as e:
                           st.error(f"Error generating simulation plot: {e}")
-                          st.error("This is likely related to the dates/index used for the simulation plot.")
+                          st.error("This error likely indicates the date index for the simulated plot is malformed after concatenation.")
+                          st.write(f"Type of plot_sim_dates: {type(plot_sim_dates)}")
+                          if isinstance(plot_sim_dates, pd.DatetimeIndex):
+                               st.write(f"Plot dates range: {plot_sim_dates.min().strftime('%Y-%m-%d')} to {plot_sim_dates.max().strftime('%Y-%m-%d')}")
+                          st.write(f"First 5 plot_sim_dates: {plot_sim_dates.tolist()[:5]}")
+
+
                      plt.close(fig2)
                 else:
                      st.error("Error plotting simulation: Date and price length mismatch. Skipping simulation plot.")
