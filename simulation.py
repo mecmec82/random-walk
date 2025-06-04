@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import pandas as pd
+import time # Import time for potential rate limiting
+
 
 # --- Streamlit App Configuration ---
 st.set_page_config(page_title="Crypto Random Walk Simulation", layout="wide")
@@ -14,143 +16,192 @@ st.write("Simulate multiple future crypto price movements using random walks and
 # --- Input Parameters ---
 st.sidebar.header("Simulation Settings")
 
-exchange_id = st.sidebar.selectbox("Select Exchange", ['coinbase', 'coinbasepro'], index=0) # Added exchange selection
+exchange_id = st.sidebar.selectbox("Select Exchange", ['coinbase', 'coinbasepro'], index=1) # Default to coinbasepro
 st.sidebar.write(f"Using exchange: **{exchange_id}**")
 
 
 ticker = st.sidebar.text_input("Trading Pair (e.g., BTC/USD)", 'BTC/USD').upper()
 
-historical_days = st.sidebar.number_input("Historical Trading Days for Analysis", min_value=50, value=300, step=10)
+historical_days_requested = st.sidebar.number_input("Historical Trading Days for Analysis", min_value=100, value=900, step=100)
 simulation_days = st.sidebar.number_input("Future Simulation Days", min_value=1, value=30, step=1)
-num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_value=1, value=100, step=10) # Increased default for better stats
+num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_value=1, value=200, step=10) # Increased default for better stats
 
 st.sidebar.write("Data fetched using CCXT. Public data access typically does not require an API key.")
 st.sidebar.write("Free data sources may have rate limits or data availability issues.")
 st.sidebar.write("Note: `coinbasepro` is often better supported for trading data than `coinbase`.")
 
 
+# --- Helper function to fetch historical data with multiple calls ---
+@st.cache_data # Cache data fetching results to avoid re-fetching on rerun
+def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_call=1000):
+    """
+    Fetches historical OHLCV data by making multiple API calls if needed.
+    Returns a pandas DataFrame with datetime index.
+    """
+    ohlcv_list = []
+    since_timestamp = None # Start with no 'since' to get the most recent data
+
+    # We need to fetch roughly num_days, but exchanges give data in chunks by limit.
+    # Estimate the number of calls needed, but loop until we have enough or no more data
+    fetched_count = 0
+    max_retries = 5 # Simple retry mechanism
+    retries = 0
+
+    st.info(f"Attempting to fetch ~{num_days} daily candles for {ticker} from {exchange_id}...")
+
+    exchange = getattr(ccxt, exchange_id)()
+    # Optional: set timeout and rateLimit if needed
+    # exchange.timeout = 10000 # 10 seconds
+    # exchange.rateLimit = 1000 # 1 second between requests
+
+    # Check if the exchange supports fetchOHLCV
+    if not exchange.has or not exchange.has.get('fetchOHLCV'):
+         st.error(f"Exchange '{exchange_id}' does not support fetching OHLCV data (fetchOHLCV).")
+         return pd.DataFrame() # Return empty DataFrame on failure
+
+    # Load markets and check ticker/timeframe
+    try:
+        exchange.load_markets()
+        if ticker not in exchange.markets:
+             st.error(f"Trading pair '{ticker}' not found on exchange '{exchange_id}'.")
+             return pd.DataFrame()
+        if timeframe not in exchange.timeframes:
+            st.error(f"Timeframe '{timeframe}' is not supported by exchange '{exchange_id}' for ticker '{ticker}'.")
+            return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error loading markets or checking ticker/timeframe: {e}")
+        return pd.DataFrame()
+
+
+    # Loop until we have enough data or the API returns less than the limit
+    while fetched_count < num_days and retries < max_retries:
+        try:
+            # Fetch data. If since_timestamp is None, fetches the latest data.
+            # If since_timestamp is set, fetches data FROM that timestamp onwards.
+            # We actually want data BEFORE the current oldest timestamp, so we fetch
+            # starting from the *last* oldest timestamp with a negative limit?
+            # No, the standard pattern is to fetch *backwards* from the latest.
+            # We fetch 'limit_per_call' ending at `until_timestamp`. If `until_timestamp` is None, it's the current time.
+            # CCXT's fetch_ohlcv typically fetches 'limit' candles ending *before or at* 'since' if called with `since`
+            # OR starting *from or at* `since` if called with `since`.
+            # The standard way to go backwards is: fetch latest, get oldest timestamp, fetch again with `since=oldest_timestamp`, but some exchanges return the same candle.
+            # A more robust way for going backwards is often to fetch *until* a timestamp using params, but that's exchange specific.
+            # Let's use the simple `since=oldest_timestamp` approach and rely on pandas for sorting and deduplication.
+
+            # Determine the `until` timestamp for this fetch
+            until_timestamp = since_timestamp # This will be None for the first fetch
+
+            # Determine the `since` timestamp for this fetch - to get data *before* `until`
+            # For fetching backwards, we usually set `until` and leave `since` as None,
+            # or use `since` to get data *from* an earlier point.
+            # Let's stick to the `since` parameter to get data *from* an earlier point,
+            # effectively fetching from `since` to now (or limit points from `since`).
+            # We need to adjust `since` *backwards* in time in each iteration.
+            # The first call gets the latest data (since=None). The oldest point in this data becomes the `until` for the *next* call.
+            # But fetch_ohlcv doesn't have a standard `until` param, only `since`.
+            # Let's use a simple loop: fetch N latest, get oldest timestamp T. Fetch N latest ending at T-1ms.
+            # This requires exchange-specific `params` like `endTime` or similar, which is complex.
+
+            # Let's revert to the most reliable common pattern: fetch `limit` candles *starting from* `since`.
+            # Start `since` as None to get latest.
+            # After getting a chunk, set `since` to the timestamp of the *first* candle in the chunk to get the *next oldest* chunk.
+            # Collect chunks, then sort and deduplicate.
+
+            chunk = exchange.fetch_ohlcv(ticker, timeframe, since=since_timestamp, limit=limit_per_call)
+
+            if not chunk:
+                st.info("No more historical data available from the exchange.")
+                break # No more data
+
+            st.info(f"Fetched {len(chunk)} candles (Total collected: {fetched_count + len(chunk)}).")
+            ohlcv_list.append(chunk)
+            fetched_count += len(chunk)
+
+            # Get the timestamp of the oldest candle in the current chunk
+            since_timestamp = chunk[0][0]
+
+            # Implement a small delay to avoid hitting rate limits, especially on free tiers
+            time.sleep(exchange.rateLimit / 1000) # Sleep based on exchange rate limit setting
+
+        except ccxt.RateLimitExceeded as e:
+            retries += 1
+            st.warning(f"Rate limit exceeded: {e}. Waiting and retrying ({retries}/{max_retries})...")
+            time.sleep(exchange.rateLimit / 1000 * (2 ** retries)) # Exponential backoff
+        except ccxt.BaseError as e:
+            st.error(f"Error fetching chunk: {e}. Cannot fetch more data.")
+            break # Stop fetching on other CCXT errors
+        except Exception as e:
+            st.error(f"An unexpected error occurred during chunk fetching: {e}. Cannot fetch more data.")
+            break # Stop fetching on other unexpected errors
+
+    if retries == max_retries:
+         st.error(f"Max retries ({max_retries}) reached due to rate limits or errors. Data may be incomplete.")
+
+
+    # Combine all fetched chunks
+    all_ohlcv = [item for sublist in ohlcv_list for item in sublist]
+
+    if not all_ohlcv:
+        st.warning("No OHLCV data was successfully fetched.")
+        return pd.DataFrame()
+
+    # Convert to DataFrame
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+    # --- Timestamp Conversion ---
+    # CCXT timestamps are in milliseconds
+    try:
+        df['timestamp_dt'] = pd.to_datetime(df['timestamp'], unit='ms')
+    except Exception as e:
+        st.error(f"Error converting timestamps to datetime: {e}. Data format might be unexpected.")
+        st.stop() # Cannot proceed without valid dates
+
+    df = df.dropna(subset=['timestamp_dt'])
+    df.set_index('timestamp_dt', inplace=True)
+
+    # Sort by index (timestamp) and remove duplicates
+    df = df.sort_index()
+    df = df.loc[~df.index.duplicated(keep='first')] # Keep the first occurrence of any duplicate timestamp
+
+    st.info(f"Total unique daily candles fetched and processed: {len(df)}")
+
+    # Select the 'close' price and take the last 'num_days'
+    historical_data_close = df['close'].tail(num_days)
+
+    if len(historical_data_close) < num_days:
+        st.warning(f"Only {len(historical_data_close)} daily candles available for analysis after filtering and selecting the last {num_days} days.")
+
+    return historical_data_close
+
+
 # --- Main Simulation Logic (triggered by button) ---
 if st.button("Run Simulation"):
 
-    exchange = None
-    try:
-        # Initialize the exchange
-        exchange = getattr(ccxt, exchange_id)()
-        # Load markets to ensure everything is set up
-        exchange.load_markets()
-    except AttributeError:
-        st.error(f"Exchange '{exchange_id}' not found. Please check the exchange ID.")
-        st.stop()
-    except Exception as e:
-        st.error(f"Could not initialize exchange '{exchange_id}': {e}")
-        st.stop()
+    # --- Fetch Historical Data ---
+    # Use the helper function to fetch potentially large history
+    historical_data_close_analyzed = fetch_historical_ohlcv(
+        exchange_id=exchange_id,
+        ticker=ticker,
+        timeframe='1d', # Daily timeframe
+        num_days=historical_days_requested,
+        limit_per_call=1000 # Max candles per API call
+    )
 
-    # Ensure the exchange supports fetching OHLCV data for the specific ticker
-    if not exchange.has or not exchange.has.get('fetchOHLCV'):
-         st.error(f"Exchange '{exchange_id}' does not support fetching OHLCV data (fetchOHLCV).")
+    if historical_data_close_analyzed.empty or len(historical_data_close_analyzed) < 2:
+         st.error(f"Not enough historical data ({len(historical_data_close_analyzed)} days) available for analysis. Need at least 2 days with valid prices.")
          st.stop()
 
-    # Check if the ticker exists and supports the timeframe
-    if ticker not in exchange.markets:
-         st.error(f"Trading pair '{ticker}' not found on exchange '{exchange_id}'.")
-         st.stop()
-
-    # Define the timeframe (daily)
-    timeframe = '1d'
-    if timeframe not in exchange.timeframes:
-        st.error(f"Timeframe '{timeframe}' is not supported by exchange '{exchange_id}' for ticker '{ticker}'.")
-        st.stop()
-
-
-    with st.spinner(f"Fetching historical data for {ticker} from {exchange_id}..."):
-        try:
-            # Fetch OHLCV data
-            ohlcv = exchange.fetch_ohlcv(ticker, timeframe, limit=2000) # Increased limit slightly
-
-            if not ohlcv:
-                st.error(f"No historical data fetched for {ticker} from {exchange_id}. Check ticker symbol or exchange status. Data might not be available via the public endpoint.")
-                st.stop()
-
-            # Convert to pandas DataFrame
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
-            # --- Timestamp Conversion ---
-            df['timestamp_dt'] = pd.NaT
-            converted = False
-            # Keep track of which unit worked (optional, but good practice)
-            conversion_unit_used = None
-
-            # Try converting as milliseconds
-            try: # <--- This 'try' block must match indentation of code above it
-                 temp_dt = pd.to_datetime(df['timestamp'], unit='ms')
-                 # Check if resulting dates are reasonable
-                 if not temp_dt.isnull().any() and temp_dt.min().year >= 1990 and temp_dt.max().year <= datetime.now().year + 2:
-                      df['timestamp_dt'] = temp_dt
-                      converted = True
-                      conversion_unit_used = 'ms'
-                 else:
-                     # Dates outside expected range for 'ms', skip this unit
-                     pass # <--- This 'pass' is part of the 'if' block
-            except Exception: # <--- This 'except' MUST match the indentation of the 'try' above it.
-                 # Conversion with 'ms' failed, skip this unit
-                 pass # <--- This 'pass' is part of the 'except' block
-
-            # If not converted, try converting as seconds
-            if not converted: # <--- This 'if' block starts here
-                 try: # <--- This 'try' block must match indentation of the 'if' above it
-                      temp_dt = pd.to_datetime(df['timestamp'], unit='s')
-                      # Check if resulting dates are reasonable
-                      if not temp_dt.isnull().any() and temp_dt.min().year >= 1990 and temp_dt.max().year <= datetime.now().year + 2:
-                           df['timestamp_dt'] = temp_dt
-                           converted = True
-                           conversion_unit_used = 's'
-                      else:
-                           # Dates outside expected range for 's', skip this unit
-                           pass # <--- This 'pass' is part of the 'if' block
-                 except Exception: # <--- This 'except' MUST match the indentation of the 'try' above it.
-                      # Conversion with 's' failed
-                      pass # <--- This 'pass' is part of the 'except' block
-
-            if not converted:
-                 st.error("Failed to convert timestamps to valid dates using 'ms' or 's'. Data format might be unexpected.")
-                 st.stop()
-
-            # st.success(f"Successfully converted timestamps using unit='{conversion_unit_used}'.") # Optional success message
-
-            df = df.dropna(subset=['timestamp_dt'])
-            # Ensure index name is standard if needed by matplotlib, though DatetimeIndex works
-            df.index.name = 'Date'
-            df.set_index('timestamp_dt', inplace=True)
-
-
-            historical_data_close = df['close'].sort_index()
-
-            if len(historical_data_close) < historical_days:
-                st.warning(f"Only {len(historical_data_close)} daily candles available from {exchange_id} for {ticker} after date conversion. Using all available data ({len(historical_data_close)} days) for historical analysis.")
-                historical_data_close_analyzed = historical_data_close
-            else:
-                historical_data_close_analyzed = historical_data_close.tail(historical_days)
-
-            if historical_data_close_analyzed.empty or len(historical_data_close_analyzed) < 2:
-                 st.error(f"Not enough historical data ({len(historical_data_close_analyzed)} days) available or parsed for analysis after filtering. Need at least 2 days with valid prices.")
-                 st.stop()
-
-        except ccxt.BaseError as e:
-             st.error(f"Error fetching data from {exchange_id}: {e}")
-             st.error("This could be a network issue, incorrect ticker, or hitting exchange rate limits.")
-             st.stop()
-        except Exception as e:
-            st.error(f"An unexpected error occurred during data processing: {e}")
-            st.stop()
 
     # --- Calculate Historical Returns and Volatility ---
     with st.spinner("Calculating historical statistics..."):
+        # Calculate log returns from the fetched historical data
         log_returns = np.log(historical_data_close_analyzed / historical_data_close_analyzed.shift(1)).dropna()
 
         if len(log_returns) < 1:
-            st.error(f"Not enough valid historical data ({len(historical_data_close_analyzed)} prices) to calculate returns and volatility after cleaning. Need at least 2 consecutive valid prices.")
+            st.error(f"Not enough valid historical data ({len(historical_data_close_analyzed)} prices) to calculate returns and volatility. Need at least 2 consecutive valid prices.")
             st.stop()
 
+        # Calculate mean and standard deviation of log returns
         mean_daily_log_return = log_returns.mean()
         daily_log_volatility = log_returns.std()
 
@@ -170,7 +221,7 @@ if st.button("Run Simulation"):
 
     try:
         # Add 1 because the simulation path includes the starting point (last historical date)
-        # but pd.date_range starts *after* the given date with freq='B'
+        # but pd.date_range with freq='B' starts *after* the given date
         simulated_dates = pd.date_range(start=last_historical_date, periods=simulation_days + 1, freq='B')[1:]
 
         if len(simulated_dates) != simulation_days:
@@ -311,11 +362,11 @@ if st.button("Run Simulation"):
 
              # Upper band label
              ax.text(final_date, upper_band[-1], f" ${upper_band[-1]:.2f}",
-                     color='darkorange', fontsize=9, ha='left', va='bottom') # va='bottom' places text slightly above the point
+                     color='darkorange', fontsize=9, ha='left', va='bottom')
 
              # Lower band label
              ax.text(final_date, lower_band[-1], f" ${lower_band[-1]:.2f}",
-                     color='darkorange', fontsize=9, ha='left', va='top') # va='top' places text slightly below the point
+                     color='darkorange', fontsize=9, ha='left', va='top')
 
              # Optional: Add a horizontal line for the historical closing price on the simulation side
              # if len(historical_data_close_analyzed) > 0:
@@ -326,7 +377,7 @@ if st.button("Run Simulation"):
         # Add legend if simulation aggregates were plotted
         ax.legend()
 
-    elif len(all_simulated_paths) > 0: # Paths were generated, but aggregates couldn't be plotted
+    elif len(all_simulated_paths) > 0:
         st.warning("Could not plot simulation aggregates due to data length issues or calculation errors.")
     else:
         st.warning("No simulation data available to plot.")
@@ -343,11 +394,6 @@ if st.button("Run Simulation"):
     except Exception as e:
         st.error(f"Error generating plot: {e}")
         st.error("This error might still be related to date formatting within Matplotlib. Check console logs.")
-        # Optional: print debug info about dates if plot fails again
-        # st.write(f"Type of plot_sim_dates: {type(plot_sim_dates)}")
-        # if isinstance(plot_sim_dates, pd.DatetimeIndex):
-        #      st.write(f"Plot dates range: {plot_sim_dates.min()} to {plot_sim_dates.max()}")
-        # st.write(f"First 5 plot_sim_dates: {plot_sim_dates.tolist()[:5]}")
 
     # Close the figure to prevent memory leaks
     plt.close(fig)
