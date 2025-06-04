@@ -30,6 +30,25 @@ historical_days_requested = st.sidebar.number_input("Historical Trading Days for
 simulation_days = st.sidebar.number_input("Future Simulation Days", min_value=1, value=30, step=1)
 num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_value=1, value=200, step=10)
 
+# --- Add Slider for Displayed Historical Days ---
+# This slider is defined *outside* the button block so it appears immediately.
+# Its max_value is based on the actual number of days successfully fetched and available for analysis.
+max_display_days = len(historical_data_close_analyzed)
+# Set default value: requested days, capped by available, min 100 unless less data is available
+default_display_days = min(historical_days_requested, max_display_days)
+default_display_days = max(100, default_display_days) if max_display_days >= 100 else max_display_days
+
+
+historical_days_to_display = st.sidebar.slider(
+    "Historical Days to Display on Plot",
+    min_value=min(100, max_display_days) if max_display_days >= 100 else max_display_days, # Ensure min_value doesn't exceed available data
+    max_value=max_display_days,
+    value=default_display_days,
+    step=10,
+    help="Slide to change the number of historical trading days shown on the chart. Does not affect analysis period."
+)
+
+
 st.sidebar.write("Data fetched using yfinance (Yahoo Finance).")
 st.sidebar.write("Note: Yahoo Finance data may have occasional inaccuracies or downtime.")
 
@@ -145,23 +164,6 @@ with st.spinner("Calculating historical statistics..."):
 # The variables mean_float and volatility_float are available globally (within the script's scope).
 
 
-# --- Add Slider for Displayed Historical Days ---
-# This slider is defined *outside* the button block so it appears immediately.
-# Its max_value is based on the actual number of days successfully fetched and available for analysis.
-max_display_days = len(historical_data_close_analyzed)
-# Set default value: requested days, capped by available, min 100 unless less data is available
-default_display_days = min(historical_days_requested, max_display_days)
-default_display_days = max(100, default_display_days) if max_display_days >= 100 else max_display_days
-
-
-historical_days_to_display = st.sidebar.slider(
-    "Historical Days to Display on Plot",
-    min_value=min(100, max_display_days) if max_display_days >= 100 else max_display_days, # Ensure min_value doesn't exceed available data
-    max_value=max_display_days,
-    value=default_display_days,
-    step=10,
-    help="Slide to change the number of historical trading days shown on the chart. Does not affect analysis period."
-)
 
 # --- Define the plotting function ---
 # This function will be called *outside* the button block to redraw the plot
