@@ -17,7 +17,7 @@ st.write("Simulate multiple future crypto price movements using random walks and
 # --- Input Parameters ---
 st.sidebar.header("Simulation Settings")
 
-exchange_id = st.sidebar.selectbox("Select Exchange", ['coinbasepro', 'coinbase'], index=0) # Default to coinbasepro
+exchange_id = st.sidebar.selectbox("Select Exchange", ['binance', 'coinbase'], index=0) # Default to coinbasepro
 st.sidebar.write(f"Using exchange: **{exchange_id}**")
 
 
