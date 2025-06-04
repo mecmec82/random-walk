@@ -15,7 +15,7 @@ st.write("Simulate future crypto price movements using a random walk based on hi
 st.sidebar.header("Simulation Settings")
 
 # Use Coinbase Pro as the exchange (usually allows public data)
-exchange_id = 'coinbasepro'
+exchange_id = 'coinbase'
 st.sidebar.write(f"Using exchange: **{exchange_id}**")
 
 # Ticker for Bitcoin vs USD on most exchanges (CCXT format)
