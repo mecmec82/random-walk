@@ -9,10 +9,10 @@ import math # For ceiling
 
 
 # --- Streamlit App Configuration ---
-st.set_page_config(page_title="Crypto Random Walk Simulation", layout="wide")
+st.set_page_config(page_title="Random Walk Simulation", layout="wide")
 
 st.title("Crypto Price Random Walk Simulation")
-st.write("Simulate multiple future crypto price movements using random walks and visualize the median and standard deviation.")
+st.write("Simulate multiple future  price movements using random walks and visualize the median and standard deviation.")
 
 # --- Input Parameters ---
 st.sidebar.header("Simulation Settings")
