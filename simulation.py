@@ -107,11 +107,10 @@ if st.button("Run Simulation"):
         daily_log_volatility = log_returns.std()
 
         # --- Explicitly cast to float and check for finite numbers before formatting ---
-        # This defends against mean()/std() potentially returning a Series-like object unexpectedly
         try:
             mean_float = float(mean_daily_log_return)
             volatility_float = float(daily_log_volatility)
-        except (TypeError, ValueError) as e: # Catch ValueError too just in case
+        except (TypeError, ValueError) as e:
              st.error(f"Unexpected value or type for calculated mean or volatility: {e}")
              st.info(f"Mean value: {mean_daily_log_return}, Mean type: {type(mean_daily_log_return)}")
              st.info(f"Volatility value: {daily_log_volatility}, Volatility type: {type(daily_log_volatility)}")
@@ -172,23 +171,19 @@ if st.button("Run Simulation"):
     # Only proceed if we have enough historical data and successfully generated simulation dates
     if sim_path_length > 0 and len(historical_data_close_analyzed) > 0:
         with st.spinner(f"Running {num_simulations} simulations for {simulation_days} days..."):
-            # --- Explicitly cast to float and check for finite numbers ---
-            # This defends against .iloc[-1] potentially returning a Series-like object unexpectedly
+            # Get start price and explicitly cast to float for safety
             try:
                 raw_start_price_value = historical_data_close_analyzed.iloc[-1]
-                start_price = float(raw_start_price_value)
+                start_price = float(raw_start_price_value) # Explicitly cast to float here
             except (TypeError, ValueError) as e:
                  st.error(f"Unexpected value or type for last historical price before conversion: {e}")
                  st.info(f"Last price value: {raw_start_price_value}, type: {type(raw_start_price_value)}")
                  start_price = np.nan # Set to NaN if conversion fails
 
 
-            # --- DEBUGGING: Print type/value just before the isfinite check ---
-            st.info(f"DEBUG: start_price value before isfinite check: {start_price}, type: {type(start_price)}")
-            # --- END DEBUGGING ---
-
-            # Line 178 in the user's traceback corresponds to this line:
-            if not np.isfinite(start_price): # This line is where the error is occurring in your environment
+            # Check if start_price is a finite number AFTER the float conversion
+            # This line corresponds to line 178 in your traceback
+            if not np.isfinite(start_price): # This check should now receive a float
                  st.error(f"Last historical price ({start_price}) is not a finite number after conversion. Cannot start simulation.")
                  all_simulated_paths = [] # Clear paths so simulation is skipped below
             else:
@@ -332,7 +327,11 @@ if st.button("Run Simulation"):
     # --- Display Final Results ---
     st.subheader("Simulation Results Overview")
     if len(historical_data_close_analyzed) > 0:
-        st.write(f"**Last Historical Price** ({historical_data_close_analyzed.index[-1].strftime('%Y-%m-%d')}): **${historical_data_close_analyzed.iloc[-1]:.2f}**")
+        # --- CRITICAL FIX HERE ---
+        # Explicitly cast to float() the value from .iloc[-1] before formatting
+        last_historical_price_scalar = float(historical_data_close_analyzed.iloc[-1])
+        st.write(f"**Last Historical Price** ({historical_data_close_analyzed.index[-1].strftime('%Y-%m-%d')}): **${last_historical_price_scalar:.2f}**")
+        # --- END CRITICAL FIX ---
 
     if len(median_prices) > 0 and np.isfinite(median_prices[-1]):
          st.write(f"Ran **{num_simulations}** simulations.")
