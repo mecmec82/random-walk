@@ -103,7 +103,6 @@ if st.button("Run Simulation"):
             st.error(f"Not enough valid historical data ({len(historical_data_close_analyzed)} prices) to calculate returns and volatility after dropping NaNs. Need at least 2 consecutive valid prices.")
             st.stop()
 
-        # Calculate mean and standard deviation of log returns
         mean_daily_log_return = log_returns.mean()
         daily_log_volatility = log_returns.std()
 
@@ -112,21 +111,21 @@ if st.button("Run Simulation"):
         try:
             mean_float = float(mean_daily_log_return)
             volatility_float = float(daily_log_volatility)
-        except TypeError as e:
-             st.error(f"Unexpected type for calculated mean or volatility: {e}")
-             st.info(f"Mean type: {type(mean_daily_log_return)}, Volatility type: {type(daily_log_volatility)}")
+        except (TypeError, ValueError) as e: # Catch ValueError too just in case
+             st.error(f"Unexpected value or type for calculated mean or volatility: {e}")
+             st.info(f"Mean value: {mean_daily_log_return}, Mean type: {type(mean_daily_log_return)}")
+             st.info(f"Volatility value: {daily_log_volatility}, Volatility type: {type(daily_log_volatility)}")
              st.stop()
 
 
         if not np.isfinite(mean_float) or not np.isfinite(volatility_float):
              st.error(f"Could not calculate finite mean or volatility from historical data.")
-             st.info(f"Calculated mean: {mean_daily_log_return}, calculated volatility: {daily_log_volatility}")
+             st.info(f"Calculated mean: {mean_float}, calculated volatility: {volatility_float}")
              st.stop()
 
 
         st.subheader("Historical Analysis Results")
         st.write(f"Based on the last **{len(historical_data_close_analyzed)}** trading days of **{ticker}**:")
-        # Now use the float variables for formatting
         st.info(f"Calculated Mean Daily Log Return: `{mean_float:.6f}`")
         st.info(f"Calculated Daily Log Volatility: `{volatility_float:.6f}`")
 
@@ -173,23 +172,36 @@ if st.button("Run Simulation"):
     # Only proceed if we have enough historical data and successfully generated simulation dates
     if sim_path_length > 0 and len(historical_data_close_analyzed) > 0:
         with st.spinner(f"Running {num_simulations} simulations for {simulation_days} days..."):
-            start_price = historical_data_close_analyzed.iloc[-1]
-            # Ensure start_price is a finite number
-            if not np.isfinite(start_price):
-                 st.error(f"Last historical price ({start_price}) is not a finite number. Cannot start simulation.")
-                 all_simulated_paths = []
+            # --- Explicitly cast to float and check for finite numbers ---
+            # This defends against .iloc[-1] potentially returning a Series-like object unexpectedly
+            try:
+                raw_start_price_value = historical_data_close_analyzed.iloc[-1]
+                start_price = float(raw_start_price_value)
+            except (TypeError, ValueError) as e:
+                 st.error(f"Unexpected value or type for last historical price before conversion: {e}")
+                 st.info(f"Last price value: {raw_start_price_value}, type: {type(raw_start_price_value)}")
+                 start_price = np.nan # Set to NaN if conversion fails
+
+
+            # --- DEBUGGING: Print type/value just before the isfinite check ---
+            st.info(f"DEBUG: start_price value before isfinite check: {start_price}, type: {type(start_price)}")
+            # --- END DEBUGGING ---
+
+            # Line 178 in the user's traceback corresponds to this line:
+            if not np.isfinite(start_price): # This line is where the error is occurring in your environment
+                 st.error(f"Last historical price ({start_price}) is not a finite number after conversion. Cannot start simulation.")
+                 all_simulated_paths = [] # Clear paths so simulation is skipped below
             else:
                 for _ in range(num_simulations):
-                    # Use the float variables for mean/volatility
                     simulated_log_returns = np.random.normal(
-                        loc=mean_float, # Use the float variable
-                        scale=volatility_float, # Use the float variable
+                        loc=mean_float,
+                        scale=volatility_float,
                         size=simulation_days
                     )
 
                     simulated_price_path = np.zeros(sim_path_length)
                     if sim_path_length > 0:
-                        simulated_price_path[0] = start_price
+                        simulated_price_path[0] = start_price # Use the confirmed float start_price
 
                         for j in range(1, sim_path_length):
                              if j - 1 < len(simulated_log_returns):
@@ -204,6 +216,7 @@ if st.button("Run Simulation"):
                     all_simulated_paths.append(simulated_price_path)
     else:
         st.warning("Skipping simulations as future dates could not be generated or historical data is missing.")
+
 
     # --- Calculate Median, Mean, Standard Deviation, and Final Prices ---
     median_prices = np.array([])
