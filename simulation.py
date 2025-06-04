@@ -6,24 +6,22 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 # --- Streamlit App Configuration ---
-st.set_page_config(page_title="Crypto Random Walk Simulation Debug", layout="wide")
+st.set_page_config(page_title="Crypto Random Walk Simulation", layout="wide")
 
-st.title("Crypto Price Random Walk Simulation (Fixing Simulation Dates)")
-st.write("Simulate future crypto price movements using a random walk based on historical volatility, using free data via CCXT.")
+st.title("Crypto Price Random Walk Simulation")
+st.write("Simulate multiple future crypto price movements using random walks based on historical volatility.")
 
 # --- Input Parameters ---
 st.sidebar.header("Simulation Settings")
 
-# Use Coinbase as the exchange ID as requested, but add note
-exchange_id = 'coinbase' # <-- Changed from 'coinbasepro'
+exchange_id = 'coinbase' # Using 'coinbase' as requested
 st.sidebar.write(f"Using exchange: **{exchange_id}**")
 
-# Ticker for Bitcoin vs USD on most exchanges (CCXT format)
-# Allow user to input but default to BTC/USD
 ticker = st.sidebar.text_input("Trading Pair (e.g., BTC/USD)", 'BTC/USD').upper()
 
 historical_days = st.sidebar.number_input("Historical Trading Days for Analysis", min_value=50, value=300, step=10)
 simulation_days = st.sidebar.number_input("Future Simulation Days", min_value=1, value=30, step=1)
+num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_value=1, value=20, step=1) # New control
 
 st.sidebar.write("Data fetched using CCXT. Public data access typically does not require an API key.")
 st.sidebar.write("Free data sources may have rate limits or data availability issues.")
@@ -75,11 +73,7 @@ if st.button("Run Simulation"):
             # Convert to pandas DataFrame
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
-            # --- IMPROVED TIMESTAMP CONVERSION WITH DEBUGGING ---
-            st.info(f"Total fetched OHLCV rows: {len(df)}")
-            st.info(f"First 5 raw timestamps from CCXT: {[ts for ts in df['timestamp'].head().tolist()]}")
-
-            # Attempt conversion, trying milliseconds first, then seconds
+            # --- Timestamp Conversion ---
             df['timestamp_dt'] = pd.NaT # Initialize a new column for datetime objects
             converted = False
             conversion_unit_used = None
@@ -87,44 +81,42 @@ if st.button("Run Simulation"):
             # Try converting as milliseconds
             try:
                  temp_dt = pd.to_datetime(df['timestamp'], unit='ms')
-                 # Check if resulting dates are reasonable
                  if not temp_dt.isnull().any() and temp_dt.min().year >= 1990 and temp_dt.max().year <= datetime.now().year + 2:
                       df['timestamp_dt'] = temp_dt
                       converted = True
                       conversion_unit_used = 'ms'
                  else:
-                     st.warning(f"Conversion with unit='ms' resulted in unusual/invalid dates ({temp_dt.min().strftime('%Y-%m-%d')} to {temp_dt.max().strftime('%Y-%m-%d')}). Trying seconds.")
-            except Exception as ts_error_ms:
-                 st.warning(f"Conversion with unit='ms' failed: {ts_error_ms}. Trying seconds.")
+                     #st.warning(f"Conversion with unit='ms' resulted in unusual/invalid dates.") # Suppress this specific warning in final app unless needed for debug
+                     pass
+            except Exception: # as ts_error_ms: # Suppress error detail unless needed for debug
+                 #st.warning(f"Conversion with unit='ms' failed.")
+                 pass
 
             # If not converted, try converting as seconds
             if not converted:
                  try:
                       temp_dt = pd.to_datetime(df['timestamp'], unit='s')
-                      # Check if resulting dates are reasonable
                       if not temp_dt.isnull().any() and temp_dt.min().year >= 1990 and temp_dt.max().year <= datetime.now().year + 2:
                            df['timestamp_dt'] = temp_dt
                            converted = True
                            conversion_unit_used = 's'
-                      else:
-                          st.warning(f"Conversion with unit='s' resulted in unusual/invalid dates ({temp_dt.min().strftime('%Y-%m-%d')} to {temp_dt.max().strftime('%Y-%m-%d')}).")
-                 except Exception as ts_error_s:
-                      st.warning(f"Conversion with unit='s' failed: {ts_error_s}.")
+                      #else:
+                          #st.warning(f"Conversion with unit='s' resulted in unusual/invalid dates.")
+                 except Exception: # as ts_error_s: # Suppress error detail
+                      #st.warning(f"Conversion with unit='s' failed.")
+                      pass
 
             if not converted:
                  st.error("Failed to convert timestamps to valid dates using 'ms' or 's'. Data format might be unexpected.")
                  st.stop()
 
-            st.success(f"Successfully converted timestamps using unit='{conversion_unit_used}'.")
+            # st.success(f"Successfully converted timestamps using unit='{conversion_unit_used}'.") # Suppress success message unless needed for debug
 
-            # Filter out any rows where conversion failed (though hopefully handled by checks)
             df = df.dropna(subset=['timestamp_dt'])
-            df.set_index('timestamp_dt', inplace=True) # Set the valid datetime column as index
+            df.set_index('timestamp_dt', inplace=True)
 
-            # We want the 'close' price and need it sorted by date (ascending)
             historical_data_close = df['close'].sort_index()
 
-            # Ensure we have enough data and take the last 'historical_days' trading days
             if len(historical_data_close) < historical_days:
                 st.warning(f"Only {len(historical_data_close)} daily candles available from {exchange_id} for {ticker} after date conversion. Using all available data ({len(historical_data_close)} days) for historical analysis.")
                 historical_data_close_analyzed = historical_data_close
@@ -134,13 +126,6 @@ if st.button("Run Simulation"):
             if historical_data_close_analyzed.empty or len(historical_data_close_analyzed) < 2:
                  st.error(f"Not enough historical data ({len(historical_data_close_analyzed)} days) available or parsed for analysis after filtering. Need at least 2 days with valid prices.")
                  st.stop()
-
-            # --- More Debugging Info on Final Historical Data ---
-            st.info(f"Historical data shape for analysis: {historical_data_close_analyzed.shape}")
-            st.info(f"Historical data index type: {type(historical_data_close_analyzed.index)}")
-            if not historical_data_close_analyzed.empty:
-                 st.info(f"Historical date range: {historical_data_close_analyzed.index.min().strftime('%Y-%m-%d')} to {historical_data_close_analyzed.index.max().strftime('%Y-%m-%d')}")
-
 
         except ccxt.BaseError as e:
              st.error(f"Error fetching data from {exchange_id}: {e}")
@@ -166,116 +151,130 @@ if st.button("Run Simulation"):
         st.info(f"Calculated Mean Daily Log Return: `{mean_daily_log_return:.6f}`")
         st.info(f"Calculated Daily Log Volatility: `{daily_log_volatility:.6f}`")
 
-    # --- Plotting Historical Data Separately ---
-    st.subheader("Plot 1: Historical Price Data")
+
+    # --- Prepare Dates for Plotting (Historical + Simulated) ---
+    historical_dates = historical_data_close_analyzed.index
+    last_historical_date = historical_dates.max()
+
+    # Generate future dates for the simulation
+    try:
+        simulated_dates = pd.date_range(start=last_historical_date, periods=simulation_days + 1, freq='B')[1:] # [1:] excludes start date
+        if len(simulated_dates) != simulation_days:
+             st.warning(f"Could not generate exactly {simulation_days} business days after {last_historical_date.strftime('%Y-%m-%d')}. Generated {len(simulated_dates)}. Simulation path length might be affected.")
+
+    except Exception as date_range_error:
+         st.error(f"Error generating future dates for simulation: {date_range_error}. Cannot plot simulation.")
+         simulated_dates = pd.DatetimeIndex([]) # Set to empty if error
+
+
+    # Combine historical last date with simulated dates for plotting the simulation paths
+    if len(simulated_dates) > 0:
+        last_historical_date_index = pd.DatetimeIndex([last_historical_date])
+        plot_sim_dates = last_historical_date_index.append(simulated_dates)
+        # Ensure it's a DatetimeIndex after append
+        plot_sim_dates = pd.DatetimeIndex(plot_sim_dates)
+    else:
+        plot_sim_dates = pd.DatetimeIndex([]) # Empty if simulation dates generation failed
+
+
+    # --- Run Multiple Simulations ---
+    all_simulated_paths = []
+    if len(simulated_dates) > 0:
+        with st.spinner(f"Running {num_simulations} simulations for {simulation_days} days..."):
+            for i in range(num_simulations):
+                 # Generate random daily log returns for this simulation path
+                simulated_log_returns = np.random.normal(
+                    loc=mean_daily_log_return,
+                    scale=daily_log_volatility,
+                    size=simulation_days
+                )
+
+                # --- Calculate Simulated Price Path ---
+                simulated_price_path = np.zeros(simulation_days + 1)
+                simulated_price_path[0] = historical_data_close_analyzed.iloc[-1] # Start from the last historical price
+
+                for j in range(1, simulation_days + 1):
+                    simulated_price_path[j] = simulated_price_path[j-1] * np.exp(simulated_log_returns[j-1])
+
+                # Trim path if simulated_dates was trimmed
+                if len(simulated_price_path) > len(simulated_dates) + 1:
+                     simulated_price_path = simulated_price_path[:len(simulated_dates) + 1]
+
+                all_simulated_paths.append(simulated_price_path)
+    else:
+        st.warning("Skipping simulations as future dates could not be generated.")
+
+
+    # --- Plotting ---
+    st.subheader("Price Chart: Historical Data and Multiple Simulated Paths")
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    # Plot Historical Data
     if not historical_data_close_analyzed.empty:
-        fig1, ax1 = plt.subplots(figsize=(14, 7))
-        ax1.plot(historical_data_close_analyzed.index, historical_data_close_analyzed, label=f'Historical {ticker} Price', color='blue')
-        ax1.set_title(f'{ticker} Price: Historical Data ({exchange_id})')
-        ax1.set_xlabel('Date')
-        ax1.set_ylabel('Price ($)')
-        ax1.legend()
-        ax1.grid(True)
-        try:
-            st.pyplot(fig1)
-            st.success("Historical plot generated successfully.")
-        except Exception as e:
-            st.error(f"Error generating historical plot: {e}")
-            st.error("This plot error is unexpected if the previous date checks passed. Double-check console logs.")
-        plt.close(fig1)
+        ax.plot(historical_dates, historical_data_close_analyzed, label=f'Historical {ticker} Price', color='blue', linewidth=2)
     else:
         st.warning("No historical data available to plot.")
 
-
-    # --- Prepare and Run Simulation (Only if historical data was successfully processed) ---
-    if not historical_data_close_analyzed.empty and len(log_returns) >= 1: # Ensure historical analysis was successful
-        with st.spinner(f"Running simulation for {simulation_days} days..."):
-            last_price = historical_data_close_analyzed.iloc[-1] # Get the very last historical price
-
-            # Generate random daily log returns for the simulation period
-            simulated_log_returns = np.random.normal(
-                loc=mean_daily_log_return,
-                scale=daily_log_volatility,
-                size=simulation_days
-            )
-
-            # --- Calculate Simulated Price Path ---
-            simulated_price_path = np.zeros(simulation_days + 1)
-            simulated_price_path[0] = last_price # The simulation starts at the last real price
-
-            for i in range(1, simulation_days + 1):
-                simulated_price_path[i] = simulated_price_path[i-1] * np.exp(simulated_log_returns[i-1])
-
-            # --- Prepare Dates for Plotting Simulation ---
-            historical_dates = historical_data_close_analyzed.index
-            last_historical_date = historical_dates.max()
-
-            try:
-                simulated_dates = pd.date_range(start=last_historical_date, periods=simulation_days + 1, freq='B')[1:]
-                if len(simulated_dates) != simulation_days:
-                     st.warning(f"Could not generate exactly {simulation_days} business days after {last_historical_date.strftime('%Y-%m-%d')}. Generated {len(simulated_dates)}. Trimming simulation results.")
-                     simulated_price_path = simulated_price_path[:len(simulated_dates) + 1]
-                     if len(simulated_price_path) > 0:
-                          st.warning(f"Simulated price path trimmed to length {len(simulated_price_path)}.")
-
-            except Exception as date_range_error:
-                 st.error(f"Error generating future dates for simulation: {date_range_error}. Cannot plot simulation.")
-                 simulated_dates = pd.DatetimeIndex([])
-                 simulated_price_path = np.array([])
-
-
-            # --- Plotting Simulated Data Separately ---
-            st.subheader("Plot 2: Simulated Future Price")
-
-            if len(simulated_dates) > 0 and len(simulated_price_path) > 1: # Need at least 2 points to draw a line
-                fig2, ax2 = plt.subplots(figsize=(14, 7))
-
-                # --- CRITICAL CHANGE HERE ---
-                # Convert the single last_historical_date into a DatetimeIndex of length 1
-                last_historical_date_index = pd.DatetimeIndex([last_historical_date])
-                # Concatenate the single-element index with the simulated dates index
-                plot_sim_dates = last_historical_date_index.append(simulated_dates)
-
-
-                if len(plot_sim_dates) == len(simulated_price_path):
-                     # Ensure the index is a DatetimeIndex, though .append usually maintains this
-                     plot_sim_dates = pd.DatetimeIndex(plot_sim_dates) # belt-and-suspenders check
-
-                     ax2.plot(plot_sim_dates, simulated_price_path, label=f'Simulated Future Price ({len(simulated_dates)} days)', color='red', linestyle='--')
-                     ax2.set_title(f'{ticker} Price: Simulated Future Random Walk')
-                     ax2.set_xlabel('Date')
-                     ax2.set_ylabel('Price ($)')
-                     ax2.legend()
-                     ax2.grid(True)
-                     try:
-                          st.pyplot(fig2)
-                          st.success("Simulation plot generated successfully.")
-                     except Exception as e:
-                          st.error(f"Error generating simulation plot: {e}")
-                          st.error("This error likely indicates the date index for the simulated plot is malformed after concatenation.")
-                          st.write(f"Type of plot_sim_dates: {type(plot_sim_dates)}")
-                          if isinstance(plot_sim_dates, pd.DatetimeIndex):
-                               st.write(f"Plot dates range: {plot_sim_dates.min().strftime('%Y-%m-%d')} to {plot_sim_dates.max().strftime('%Y-%m-%d')}")
-                          st.write(f"First 5 plot_sim_dates: {plot_sim_dates.tolist()[:5]}")
-
-
-                     plt.close(fig2)
-                else:
-                     st.error("Error plotting simulation: Date and price length mismatch. Skipping simulation plot.")
-                     st.write(f"Plot dates length: {len(plot_sim_dates)}, Simulated prices length: {len(simulated_price_path)}")
-            elif len(simulated_dates) > 0 or len(simulated_price_path) > 0:
-                 st.warning("Not enough data points generated for simulation plot.")
+    # Plot Simulated Data
+    if len(all_simulated_paths) > 0 and len(plot_sim_dates) > 1:
+        for i, path in enumerate(all_simulated_paths):
+            if len(plot_sim_dates) == len(path):
+                 ax.plot(plot_sim_dates, path, color='red', linestyle='--', alpha=0.3, linewidth=1, label='_nolegend_' if i > 0 else f'{num_simulations} Simulated Paths')
             else:
-                 st.warning("No simulated data available to plot.")
+                 st.warning(f"Skipping simulation path {i+1} due to date and price length mismatch ({len(plot_sim_dates)} dates vs {len(path)} prices).")
 
-        # --- Display Final Prices (Only if simulation ran) ---
-        st.subheader("Simulation Results")
-        if len(historical_data_close_analyzed) > 0:
-            st.write(f"**Last Historical Price** ({historical_data_close_analyzed.index[-1].strftime('%Y-%m-%d')}): **${historical_data_close_analyzed.iloc[-1]:.2f}**")
-        if len(simulated_dates) > 0 and len(simulated_price_path) > 0:
-             st.write(f"**Simulated Price** after {len(simulated_dates)} steps ({simulated_dates[-1].strftime('%Y-%m-%d')}): **${simulated_price_path[-1]:.2f}**")
+        # Add labels only if simulations were attempted and plotted
+        if any(len(path) > 1 and len(plot_sim_dates) == len(path) for path in all_simulated_paths):
+             # Only add legend if at least one path was successfully plotted
+             ax.legend()
         else:
-             st.warning("No simulated results to display.")
+             st.warning("No simulation paths could be plotted due to data length issues.")
 
+
+    elif len(all_simulated_paths) > 0: # means len(plot_sim_dates) was not > 1
+         st.warning("Not enough future dates generated to plot simulations.")
     else:
-         st.error("Skipping simulation and second plot due to insufficient or invalid historical data.")
+         st.warning("No simulation paths were generated.")
+
+
+    ax.set_title(f'{ticker} Price: Historical Data ({exchange_id}) and Random Walk Simulation')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Price ($)')
+
+    ax.grid(True)
+
+    # Use Streamlit's plotting function
+    try:
+        st.pyplot(fig)
+        # st.success("Plot generated successfully.") # Suppress success message
+    except Exception as e:
+        st.error(f"Error generating plot: {e}")
+        st.error("This error might still be related to date formatting within Matplotlib despite efforts to fix. Check console logs.")
+        # Optional: print debug info about dates if plot fails again
+        # st.write(f"Type of plot_sim_dates: {type(plot_sim_dates)}")
+        # if isinstance(plot_sim_dates, pd.DatetimeIndex):
+        #      st.write(f"Plot dates range: {plot_sim_dates.min()} to {plot_sim_dates.max()}")
+        # st.write(f"First 5 plot_sim_dates: {plot_sim_dates.tolist()[:5]}")
+
+    # Close the figure to prevent memory leaks
+    plt.close(fig)
+
+    # --- Display Final Prices (Optional - might be too much for many sims) ---
+    st.subheader("Simulation Results Overview")
+    if len(historical_data_close_analyzed) > 0:
+        st.write(f"**Last Historical Price** ({historical_data_close_analyzed.index[-1].strftime('%Y-%m-%d')}): **${historical_data_close_analyzed.iloc[-1]:.2f}**")
+
+    if len(all_simulated_paths) > 0 and len(all_simulated_paths[0]) > 0:
+         st.write(f"Ran **{len(all_simulated_paths)}** simulations.")
+         # Could add summary stats of ending prices here (mean, std dev, min, max)
+         final_prices = [path[-1] for path in all_simulated_paths if len(path) > 0]
+         if final_prices:
+              st.write(f"Simulated Ending Prices (after {len(simulated_dates)} steps):")
+              st.write(f"- Mean: ${np.mean(final_prices):.2f}")
+              st.write(f"- Min: ${np.min(final_prices):.2f}")
+              st.write(f"- Max: ${np.max(final_prices):.2f}")
+         else:
+              st.warning("No simulation paths were successfully generated or had data points.")
+    else:
+         st.warning("No simulated results to display.")
