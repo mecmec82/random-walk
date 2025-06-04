@@ -34,21 +34,37 @@ st.sidebar.write("Note: `coinbasepro` is generally better supported for trading 
 
 # --- Helper function to fetch historical data with multiple calls ---
 # @st.cache_data # Keep caching for efficiency, but be aware changing code inside means cache is cleared
-def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_call=1000):
+def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, default_limit_per_call=1000):
     """
     Fetches historical OHLCV data by making multiple API calls if needed,
     working backwards from the present using the oldest timestamp.
     Returns a pandas DataFrame with datetime index.
     """
     all_ohlcv = []
+    # Use a list to keep track of the oldest timestamps fetched so we can detect if we're stuck
+    oldest_timestamps_fetched = []
+
     # Start fetching from the current time (None means 'now' for the first call)
-    since_timestamp = None # timestamp in milliseconds of the *start* of the desired next chunk
+    # This will be the `since` argument for the fetch_ohlcv call
+    current_since_arg = None # timestamp in milliseconds of the *start* of the desired next chunk
+
     fetched_count = 0
-    # Estimate max attempts, plus a buffer for edge cases and partial chunks
-    max_fetch_attempts = math.ceil(num_days / limit_per_call) * 2 + 5 if limit_per_call > 0 else 10 # Double estimate + buffer
     attempt = 0
 
-    st.info(f"Attempting to fetch approximately {num_days} daily candles for {ticker} from {exchange_id} using {limit_per_call} candles per call.")
+    # Adjust limit_per_call based on known exchange limitations if necessary
+    # This is a manual adjustment based on observation/documentation
+    limit_for_this_exchange = default_limit_per_call
+    if exchange_id == 'coinbase':
+        # Coinbase (older API) seems to have a smaller limit per call, maybe around 300 or 500
+        # Let's try a safer limit here. Note: Even with a smaller limit, pagination might still be broken for this specific driver.
+        limit_for_this_exchange = 300 # Or 500? Let's try 300 as it's a common observed limit.
+        st.info(f"Adjusting limit_per_call to {limit_for_this_exchange} for {exchange_id} based on potential API limitations.")
+
+
+    # Estimate max attempts needed *if* pagination works, plus a buffer
+    max_fetch_attempts = math.ceil(num_days / limit_for_this_exchange) * 2 + 5 if limit_for_this_exchange > 0 else 10
+
+    st.info(f"Attempting to fetch approximately {num_days} daily candles for {ticker} from {exchange_id} using {limit_for_this_exchange} candles per call.")
 
     exchange = None
     try:
@@ -80,38 +96,43 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
     while fetched_count < num_days and attempt < max_fetch_attempts:
         attempt += 1
         try:
-            # fetch_ohlcv(symbol, timeframe, since=None, limit=None, params={})
+            # fetch_ohlcv(symbol, timeframe, since=timestamp, limit=N)
             # 'since' is the starting timestamp (inclusive)
             # To fetch backwards, we need to determine the `since` timestamp for the *next* oldest chunk.
             # The very first call `since=None` gets the latest data.
-            # For subsequent calls, `since` should be derived from the *oldest* candle timestamp of the *previously fetched* chunk.
+            # For subsequent calls, `since` should be derived from the *oldest* candle timestamp of the *previously fetched* chunk minus 1ms.
 
-            current_since_arg = since_timestamp # Use None for the first call
-
-            st.info(f"Attempt {attempt}: Requesting {limit_per_call} candles starting from {'None (latest)' if current_since_arg is None else datetime.utcfromtimestamp(current_since_arg / 1000).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            st.info(f"Attempt {attempt}: Requesting {limit_for_this_exchange} candles starting from {'None (latest)' if current_since_arg is None else datetime.utcfromtimestamp(current_since_arg / 1000).strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
             # Fetch data
-            # Note: CCXT handles the exchange's API nuances. For some, `since` means start, for others it might influence the end time implicitly when going backwards.
-            # The standard CCXT pattern for historical pagination relies on the exchange API returning candles *from* `since` up to `since + duration_of_limit`.
-            # To go backwards, we take the oldest candle's timestamp T, and the next call is `fetch_ohlcv(..., since=T)`. If the exchange API is well-behaved, this gets the chunk *before* the previous one.
-            # Some APIs might require `params={'endTime': T - 1}` which is non-standard. We stick to the standard `since` first.
-            chunk = exchange.fetch_ohlcv(ticker, timeframe, since=current_since_arg, limit=limit_per_call)
+            chunk = exchange.fetch_ohlcv(ticker, timeframe, since=current_since_arg, limit=limit_for_this_exchange)
 
             if not chunk:
-                st.info(f"Attempt {attempt}: No data returned for the given 'since' timestamp. Reached the end of available historical data or encountered an API issue returning empty chunks.")
+                st.info(f"Attempt {attempt}: No data returned for the given 'since' timestamp ({'None' if current_since_arg is None else datetime.utcfromtimestamp(current_since_arg / 1000).strftime('%Y-%m-%d %H:%M:%S UTC')}). Reached the end of available historical data or encountered an API issue returning empty chunks.")
                 break # No more data
 
-            # --- DETAILED LOGGING FOR THIS CHUNK ---
+            # --- DETAILED LOGGING AND DUPLICATE CHECK FOR THIS CHUNK ---
             chunk_len = len(chunk)
-            oldest_ts = chunk[0][0] if chunk_len > 0 else None
-            newest_ts = chunk[-1][0] if chunk_len > 0 else None
+            oldest_ts_in_chunk = chunk[0][0] if chunk_len > 0 else None
+            newest_ts_in_chunk = chunk[-1][0] if chunk_len > 0 else None
 
-            if oldest_ts is not None and newest_ts is not None:
-                oldest_date = datetime.utcfromtimestamp(oldest_ts / 1000).strftime('%Y-%m-%d')
-                newest_date = datetime.utcfromtimestamp(newest_ts / 1000).strftime('%Y-%m-%d')
+            if oldest_ts_in_chunk is not None and newest_ts_in_chunk is not None:
+                oldest_date = datetime.utcfromtimestamp(oldest_ts_in_chunk / 1000).strftime('%Y-%m-%d')
+                newest_date = datetime.utcfromtimestamp(newest_ts_in_chunk / 1000).strftime('%Y-%m-%d')
                 st.info(f"  Attempt {attempt}: Fetched {chunk_len} candles. Date Range: {oldest_date} to {newest_date}.")
+
+                # Add the oldest timestamp of this chunk to our history check list
+                oldest_timestamps_fetched.append(oldest_ts_in_chunk)
+
+                # Check if this oldest timestamp is the same as the last one fetched (implies stuck)
+                if len(oldest_timestamps_fetched) >= 2 and oldest_timestamps_fetched[-1] >= oldest_timestamps_fetched[-2]:
+                     # It should strictly decrease when fetching backwards
+                     st.warning(f"  Attempt {attempt}: Oldest timestamp ({oldest_date}) is NOT older than the previous oldest timestamp ({datetime.utcfromtimestamp(oldest_timestamps_fetched[-2] / 1000).strftime('%Y-%m-%d')}). API is likely not paginating correctly. Stopping fetch.")
+                     break # Stop if we detect we are stuck
+
             else:
                  st.info(f"  Attempt {attempt}: Fetched 0 candles.")
+
 
             if chunk_len == 0:
                  st.info("Chunk length is 0, stopping fetch.")
@@ -119,15 +140,12 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
 
 
             # Append the chunk to our list
-            # Important: When fetching backwards using `since=oldest_ts`, the newly fetched chunk
-            # is typically OLDER than the data already in all_ohlcv. So, prepend the new chunk.
-            # However, CCXT documentation examples often just extend and sort later. Let's stick to extend and sort for robustness against potential partial overlaps.
             all_ohlcv.extend(chunk)
 
             # Update the 'since' for the *next* call. This should be the timestamp of the *oldest* candle
             # in the *current* chunk, minus 1 millisecond.
-            # This is the core of getting the chunk immediately *before* the current one.
-            since_timestamp = oldest_ts - 1
+            current_since_arg = oldest_ts_in_chunk - 1
+
 
             # Check total fetched count based on the list length
             fetched_count = len(all_ohlcv)
@@ -137,12 +155,10 @@ def fetch_historical_ohlcv(exchange_id, ticker, timeframe, num_days, limit_per_c
                  st.info(f"Fetched enough data ({fetched_count} candles >= {num_days}). Stopping fetch loop.")
                  break
 
-            # Implement a small delay to avoid hitting rate limits, especially on free tiers
-            # Use the exchange's specified rate limit if available, otherwise default
+            # Implement a small delay to avoid hitting rate limits
             rate_limit_ms = exchange.rateLimit if hasattr(exchange, 'rateLimit') else 1000 # Default 1 second
-            # Add a small buffer to the rate limit sleep
-            sleep_duration = rate_limit_ms / 1000 + 0.1
-            st.info(f"  Attempt {attempt}: Sleeping for {sleep_duration:.2f} seconds to respect rate limit.")
+            sleep_duration = rate_limit_ms / 1000 + 0.1 # Add 100ms buffer
+            st.info(f"  Attempt {attempt}: Sleeping for {sleep_duration:.2f} seconds...")
             time.sleep(sleep_duration)
 
 
@@ -219,7 +235,8 @@ if st.button("Run Simulation"):
         ticker=ticker,
         timeframe='1d', # Daily timeframe
         num_days=historical_days_requested,
-        limit_per_call=1000 # Max candles per API call. Some exchanges might have lower limits (e.g., 300, 500)
+        # Let the function decide the limit per call based on exchange, or pass a specific one:
+        # limit_per_call=500 # Example: Try setting a specific limit here if needed
     )
 
     # Ensure we have enough data AFTER the fetch attempts
@@ -338,14 +355,17 @@ if st.button("Run Simulation"):
             mean_prices = np.mean(prices_at_each_step, axis=1)
             std_dev_prices = np.std(prices_at_each_step, axis=1)
 
+            # Calculate +/- 1 standard deviation band
             upper_band = mean_prices + std_dev_prices
             lower_band = mean_prices - std_dev_prices
 
+            # Extract final prices for overview summary
             final_prices = [path[-1] for path in all_simulated_paths]
 
 
         except Exception as e:
             st.error(f"Error calculating aggregate statistics: {e}")
+            # Keep aggregates as empty arrays if calculation fails
 
 
     elif len(all_simulated_paths) > 0:
@@ -366,6 +386,7 @@ if st.button("Run Simulation"):
         st.warning("No historical data available to plot.")
 
     # Plot Aggregated Simulated Data (Median and Band)
+    # Ensure all necessary arrays for plotting aggregates have the correct length
     if len(plot_sim_dates) > 0 and len(median_prices) == len(plot_sim_dates) and len(upper_band) == len(plot_sim_dates) and len(lower_band) == len(plot_sim_dates):
         # Plot Median Line
         ax.plot(plot_sim_dates, median_prices, label=f'Median Simulated Price ({num_simulations} runs)', color='red', linestyle='-', linewidth=2)
