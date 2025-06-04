@@ -8,7 +8,7 @@ import time
 import math
 
 # --- Streamlit App Configuration ---
-st.set_page_config(page_title="Market Random Walk Simulation (yfinance Debug)", layout="wide")
+st.set_page_config(page_title="Market Random Walk Simulation (yfinance)", layout="wide")
 
 st.title("Market Price Random Walk Simulation")
 st.write("Simulate multiple future price movements using random walks based on historical volatility, using free data via yfinance.")
@@ -180,12 +180,10 @@ if st.button("Run Simulation"):
                  st.info(f"Last price value: {raw_start_price_value}, type: {type(raw_start_price_value)}")
                  start_price = np.nan # Set to NaN if conversion fails
 
-
             # Check if start_price is a finite number AFTER the float conversion
-            # This line corresponds to line 178 in your traceback
-            if not np.isfinite(start_price): # This check should now receive a float
+            if not np.isfinite(start_price):
                  st.error(f"Last historical price ({start_price}) is not a finite number after conversion. Cannot start simulation.")
-                 all_simulated_paths = [] # Clear paths so simulation is skipped below
+                 all_simulated_paths = []
             else:
                 for _ in range(num_simulations):
                     simulated_log_returns = np.random.normal(
@@ -196,7 +194,7 @@ if st.button("Run Simulation"):
 
                     simulated_price_path = np.zeros(sim_path_length)
                     if sim_path_length > 0:
-                        simulated_price_path[0] = start_price # Use the confirmed float start_price
+                        simulated_price_path[0] = start_price
 
                         for j in range(1, sim_path_length):
                              if j - 1 < len(simulated_log_returns):
@@ -333,11 +331,75 @@ if st.button("Run Simulation"):
         st.write(f"**Last Historical Price** ({historical_data_close_analyzed.index[-1].strftime('%Y-%m-%d')}): **${last_historical_price_scalar:.2f}**")
         # --- END CRITICAL FIX ---
 
+    # Display final results only if median was successfully calculated and is finite at the end
     if len(median_prices) > 0 and np.isfinite(median_prices[-1]):
          st.write(f"Ran **{num_simulations}** simulations.")
-         if len(simulated_dates) > 0:
+         if len(simulated_dates) > 0: # Final check for data availability
+
               st.write(f"Simulated Ending Prices (after {len(simulated_dates)} steps, {simulated_dates[-1].strftime('%Y-%m-%d')}):")
               st.write(f"- Median: **${median_prices[-1]:.2f}**")
+
+              # Calculate and display percentage deltas and risk/reward
+              final_upper_price = upper_band[-1] if len(upper_band) > 0 else np.nan
+              final_lower_price = lower_band[-1] if len(lower_band) > 0 else np.nan
+
+              if np.isfinite(last_historical_price_scalar) and last_historical_price_scalar > 0:
+                   st.write("") # Add a small space
+
+                   # --- Percentage Delta to +1 Std Dev ---
+                   if np.isfinite(final_upper_price):
+                        delta_upper_pct = ((final_upper_price - last_historical_price_scalar) / last_historical_price_scalar) * 100
+                        st.write(f"Expected movement to +1 Std Dev Band End: **{delta_upper_pct:.2f}%**")
+                   else:
+                        st.warning("Cannot calculate percentage movement to +1 Std Dev band end (value is non-finite).")
+
+                   # --- Percentage Delta to -1 Std Dev ---
+                   if np.isfinite(final_lower_price):
+                        delta_lower_pct = ((final_lower_price - last_historical_price_scalar) / last_historical_price_scalar) * 100
+                        st.write(f"Expected movement to -1 Std Dev Band End: **{delta_lower_pct:.2f}%**")
+                   else:
+                        st.warning("Cannot calculate percentage movement to -1 Std Dev band end (value is non-finite).")
+
+                   # --- Risk/Reward Ratio ---
+                   if np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
+                        potential_reward = delta_upper_pct
+                        # Risk is typically a potential loss, so use the absolute value of the negative delta
+                        potential_risk = -delta_lower_pct # This will be positive if delta_lower_pct is negative
+
+                        st.write("") # Add a small space
+                        st.subheader("Risk/Reward Analysis (Based on +/- 1 Std Dev Band Ends)")
+
+                        if potential_risk > 0:
+                             # Standard ratio is Reward : Risk
+                             risk_reward_ratio = potential_reward / potential_risk
+                             st.write(f"Estimated Risk/Reward Ratio (+1 Std Dev Gain vs -1 Std Dev Loss): **{risk_reward_ratio:.2f} : 1**")
+                        elif potential_risk == 0:
+                             if potential_reward > 0:
+                                  st.write("Estimated Risk/Reward: **Infinite** (No downside to -1 Std Dev)")
+                             else:
+                                  st.write("Estimated Risk/Reward: **Undetermined** (No downside to -1 Std Dev, but also no upside to +1 Std Dev)")
+                        else: # potential_risk < 0, meaning -1 Std Dev end price is *above* start price
+                            st.write("Estimated Risk/Reward: **Favorable Downside** (-1 Std Dev end price is above historical close, implying no potential loss to the downside band)")
+                            # Could also display the ratio as 'Reward : -Risk' but that's less standard
+                            # risk_reward_ratio_alt = potential_reward / abs(potential_risk) # Or some other representation
+
+
+                        if potential_reward < 0:
+                            st.warning("Note: The expected movement to the +1 Std Dev band end is negative (a potential loss).")
+                        if potential_risk < 0:
+                            st.warning("Note: The expected movement to the -1 Std Dev band end is positive (a potential gain).")
+
+
+                   else:
+                        st.warning("Cannot calculate Risk/Reward Ratio due to non-finite percentage deltas.")
+
+                   st.write("") # Add a small space for better formatting
+
+              else:
+                   st.warning("Last historical price is not finite or is zero, cannot calculate percentage deltas or Risk/Reward.")
+
+
+              # Display Mean/Std Dev/Actual Min/Max if they are finite
               if len(mean_prices) > 0 and np.isfinite(mean_prices[-1]):
                    st.write(f"- Mean: ${mean_prices[-1]:.2f}")
               if len(std_dev_prices) > 0 and np.isfinite(std_dev_prices[-1]):
@@ -346,7 +408,6 @@ if st.button("Run Simulation"):
                    st.write(f"- +/- 1 Std Dev Range: [${lower_band[-1]:.2f}, ${upper_band[-1]:.2f}]")
               else:
                    st.warning("Ending Std Dev band values are non-finite.")
-
 
               if final_prices:
                   st.write(f"- Actual Min Ending Price: ${np.min(final_prices):.2f}")
