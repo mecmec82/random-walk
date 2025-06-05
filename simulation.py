@@ -11,7 +11,7 @@ import math
 st.set_page_config(page_title="Market Random Walk Simulation (yfinance)", layout="wide")
 
 st.title("Market Price Random Walk Simulation")
-st.write("Simulate multiple future price movements using random walks based on historical volatility estimated via EWMA, using free data via yfinance.")
+st.write("Simulate multiple future price movements using random walks based on historical volatility, using free data via yfinance.")
 
 # --- Initialize Session State for Simulation Results ---
 # This ensures simulation results persist across reruns caused by slider changes
@@ -53,30 +53,41 @@ def fetch_historical_data(ticker, num_days):
     """
     Fetches historical data for a period covering at least num_days
     using yfinance. Returns a pandas Series of closing prices with datetime index.
-    Includes basic filtering for positive prices.
+    Includes basic filtering for positive prices and ensures DatetimeIndex.
     """
     #st.info(f"Fetching historical data for {ticker} to cover at least {num_days} days...")
 
     # Determine start date: go back enough calendar days to cover num_days *trading* days
     # Using 2.5x as a generous estimate for stocks (approx 252 trading days/year)
     # to ensure we fetch enough history even for longer analysis periods.
-    # Increased buffer slightly for longer historical analysis periods
     end_date = datetime.now()
     start_date = end_date - timedelta(days=int(num_days * 2.5))
 
 
     try:
         # yf.download fetches data between start and end dates.
-        # We will then take the last `num_days_requested` of *that fetched data* for analysis,
-        # and a potentially smaller tail for display.
+        # It typically returns a DataFrame with a DatetimeIndex.
         data = yf.download(ticker, start=start_date, end=end_date, progress=False)
 
         if data.empty:
             st.error(f"No data fetched for {ticker} from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}.")
             return pd.Series() # Return empty Series
 
-        # We need the 'Close' price and ensure it's sorted by date (ascending)
-        historical_data_close = data['Close'].sort_index()
+        # We need the 'Close' price
+        historical_data_close = data['Close']
+
+        # Ensure the index is a DatetimeIndex (should be by default from yfinance)
+        if not isinstance(historical_data_close.index, pd.DatetimeIndex):
+             # Attempt conversion if it's not already
+             try:
+                  historical_data_close.index = pd.to_datetime(historical_data_close.index)
+             except Exception as e:
+                  st.error(f"Error converting historical data index to DatetimeIndex: {e}")
+                  return pd.Series() # Return empty Series if index is bad
+
+        # Ensure it's sorted by date (ascending)
+        historical_data_close = historical_data_close.sort_index()
+
 
         # Filter out any non-positive prices proactively
         original_len = len(historical_data_close)
@@ -129,6 +140,11 @@ if historical_data_close_analyzed.empty or len(historical_data_close_analyzed) <
 # It uses `historical_data_close_analyzed` which is NOT affected by the plot display slider.
 # It depends on the cached fetch result, so it's efficient unless ticker, historical_days_requested, or lambda change.
 with st.spinner("Calculating historical statistics (including EWMA volatility)..."):
+    # Ensure historical_data_close_analyzed is not empty before calculating returns
+    if historical_data_close_analyzed.empty:
+        st.error("Historical data for analysis is empty. Cannot calculate returns.")
+        st.stop()
+
     log_returns = np.log(historical_data_close_analyzed / historical_data_close_analyzed.shift(1)).dropna()
 
     if len(log_returns) < 1: # Need at least one return (2 prices)
@@ -141,15 +157,19 @@ with st.spinner("Calculating historical statistics (including EWMA volatility)..
     # --- Calculate EWMA Daily Log Volatility ---
     # The EWM method uses alpha = 1 - lambda
     ewma_alpha = 1 - ewma_lambda
+    ewma_variance_series = None # Initialize in case of error
+
     try:
         # Calculate EWMA of squared returns (variance)
-        ewma_variance_series = log_returns.pow(2).ewm(alpha=ewma_alpha, adjust=False).mean()
+        # Use min_periods=0 to handle cases with very few returns gracefully (though >=2 are needed)
+        ewma_variance_series = log_returns.pow(2).ewm(alpha=ewma_alpha, adjust=False, min_periods=0).mean()
 
         # The EWMA volatility for the *next* step is the square root of the *last* EWMA variance
-        ewma_daily_log_volatility = np.sqrt(ewma_variance_series.iloc[-1])
+        # Use .iloc[-1] and .item() to explicitly get the scalar value and avoid FutureWarning
+        ewma_daily_log_volatility_scalar = np.sqrt(ewma_variance_series.iloc[-1]).item()
 
         # Assign to the variable used in simulation
-        daily_log_volatility = float(ewma_daily_log_volatility) # Ensure it's a standard float
+        daily_log_volatility = float(ewma_daily_log_volatility_scalar)
 
 
     except Exception as e:
@@ -157,9 +177,10 @@ with st.spinner("Calculating historical statistics (including EWMA volatility)..
         daily_log_volatility = np.nan # Indicate failure
 
     # Type and finiteness checks for calculated values
+    # Use .item() for the mean to address FutureWarning
     try:
-        mean_float = float(mean_daily_log_return)
-        volatility_float = float(daily_log_volatility)
+        mean_float = float(mean_daily_log_return.item())
+        volatility_float = float(daily_log_volatility) # daily_log_volatility is already scalar float here
     except (TypeError, ValueError) as e:
          st.error(f"Unexpected value or type for calculated mean or volatility after EWMA: {e}")
          st.info(f"Mean value: {mean_daily_log_return}, Mean type: {type(mean_daily_log_return)}")
@@ -167,9 +188,8 @@ with st.spinner("Calculating historical statistics (including EWMA volatility)..
          st.stop() # Stop before simulation if stats are bad
 
     if not np.isfinite(mean_float) or not np.isfinite(volatility_float) or volatility_float <= 0:
-         st.error(f"Could not calculate finite, positive volatility ({volatility_float}) or finite mean ({mean_float}) from historical data. Check data or analysis period.")
+         st.error(f"Could not calculate finite, positive volatility ({volatility_float:.6f}) or finite mean ({mean_float:.6f}) from historical data. Check data or analysis period.")
          st.stop()
-
 
 # --- Add Slider for Displayed Historical Days ---
 # This slider is defined *outside* the button block so it appears immediately.
@@ -178,11 +198,12 @@ max_display_days = len(historical_data_close_analyzed)
 # Set default value: requested days, capped by available, min 100 unless less data is available
 default_display_days = min(historical_days_requested, max_display_days)
 default_display_days = max(100, default_display_days) if max_display_days >= 100 else max_display_days
+default_display_days = max(1, default_display_days) # Ensure at least 1 day can be displayed if data is minimal
 
 
 historical_days_to_display = st.sidebar.slider(
     "Historical Days to Display on Plot",
-    min_value=min(100, max_display_days) if max_display_days >= 100 else max_display_days, # Ensure min_value doesn't exceed available data
+    min_value=min(1, max_display_days), # Ensure min_value is at least 1 and doesn't exceed available data
     max_value=max_display_days,
     value=default_display_days,
     step=10,
@@ -202,24 +223,26 @@ sidebar_placeholder = st.sidebar.empty() # Create a placeholder to update result
 def plot_simulation(full_historical_data, historical_days_to_display, simulation_results):
     fig, ax = plt.subplots(figsize=(14, 7))
 
-    # --- Select data for plotting using the slider value ---
+    # --- Select data for plotting using the slider value and convert to numpy arrays ---
     # Use the full fetched data and take the tail based on the slider value
     historical_data_to_plot = full_historical_data.tail(historical_days_to_display)
-    historical_dates_to_plot = historical_data_to_plot.index
+
+    # Convert to numpy arrays explicitly
+    historical_dates_to_plot_np = historical_data_to_plot.index.values if not historical_data_to_plot.empty else np.array([])
+    historical_prices_to_plot_np = historical_data_to_plot.values if not historical_data_to_plot.empty else np.array([])
 
 
     # Plot Historical Data (using the filtered data for display)
-    if not historical_data_to_plot.empty:
-        # Use .values to plot the numpy array, ensuring Matplotlib gets numbers directly
-        ax.plot(historical_dates_to_plot, historical_data_to_plot.values, label=f'Historical {ticker} Price ({len(historical_data_to_plot)} days displayed)', color='blue', linewidth=2)
+    if len(historical_prices_to_plot_np) > 0:
+        ax.plot(historical_dates_to_plot_np, historical_prices_to_plot_np, label=f'Historical {ticker} Price ({len(historical_data_to_plot)} days displayed)', color='blue', linewidth=2)
     else:
         st.warning("No historical data available to plot.")
 
     # Plot Aggregated Simulated Data (Median and Band)
     # Only plot simulation results if they exist in session state
     if simulation_results is not None:
-         # Unpack results from the session state dictionary
-         plot_sim_dates = simulation_results.get('plot_sim_dates')
+         # Use .get() with default values in case keys are missing due to errors
+         plot_sim_dates_pd = simulation_results.get('plot_sim_dates')
          median_prices = simulation_results.get('median_prices')
          upper_band = simulation_results.get('upper_band')
          lower_band = simulation_results.get('lower_band')
@@ -227,15 +250,22 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
 
          # Check if plotting aggregates is possible based on the simulation results
          # Need dates, median, upper, and lower bands of consistent length and not empty
-         if (plot_sim_dates is not None and len(plot_sim_dates) > 0 and
-             median_prices is not None and len(median_prices) == len(plot_sim_dates) and np.isfinite(median_prices).any() and
-             upper_band is not None and len(upper_band) == len(plot_sim_dates) and
-             lower_band is not None and len(lower_band) == len(plot_sim_dates)):
+         # Convert plot_sim_dates to numpy array
+         plot_sim_dates_np = plot_sim_dates_pd.values if plot_sim_dates_pd is not None else np.array([])
+
+
+         if (len(plot_sim_dates_np) > 0 and
+             median_prices is not None and len(median_prices) == len(plot_sim_dates_np) and np.isfinite(median_prices).any() and
+             upper_band is not None and len(upper_band) == len(plot_sim_dates_np) and
+             lower_band is not None and len(lower_band) == len(plot_sim_dates_np)):
 
 
               # Filter points where median is finite for plotting line and band
+              # Note: The validity check here is only on the median for drawing the line/band based on it
               valid_plot_indices = np.isfinite(median_prices)
-              plot_sim_dates_valid = plot_sim_dates[valid_plot_indices]
+
+              # Apply filter to all related arrays
+              plot_sim_dates_valid = plot_sim_dates_np[valid_plot_indices]
               median_prices_valid = median_prices[valid_plot_indices]
               upper_band_valid = upper_band[valid_plot_indices]
               lower_band_valid = lower_band[valid_plot_indices]
@@ -246,11 +276,11 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
 
                  # Ensure bands also have valid finite points corresponding to the valid median points
                  if np.isfinite(upper_band_valid).all() and np.isfinite(lower_band_valid).all():
-                      ax.fill_between(plot_sim_dates_valid, lower_band_valid, upper_band_valid, color='orange', alpha=0.3, label='+/- 1 Std Dev Band')
+                      ax.fill_between(plot_sim_dates_valid, lower_band_valid, upper_band_valid, color='orange', alpha=0.3, label='+1/-1 Std Dev Band') # Changed label
                  else:
+                      # Check if only the end points of the bands are NaN, but inner points are finite
+                      # This is complex to plot segment-by-segment. Simpler to skip the band if any corresponding points are non-finite.
                       st.warning("Std dev band contains non-finite values where median is finite. Band will not be plotted or may be incomplete.")
-                      # Attempt to plot if there's at least one valid segment in the band, but this gets complicated fast
-                      # For simplicity, we require all points corresponding to the median's valid points to be finite for the band plot
 
 
                  # --- Add Labels at the end ---
@@ -260,19 +290,20 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
                       last_valid_step_index_in_simulation -= 1
 
                  if last_valid_step_index_in_simulation >= 0:
-                      final_date = plot_sim_dates[last_valid_step_index_in_simulation]
+                      # Use the original, unfiltered plot_sim_dates_pd for getting the date object for the text label
+                      final_date_text = plot_sim_dates_pd[last_valid_step_index_in_simulation]
                       final_median_price = median_prices[last_valid_step_index_in_simulation]
 
-                      ax.text(final_date, final_median_price, f" ${final_median_price:.2f}",
+                      ax.text(final_date_text, final_median_price, f" ${final_median_price:.2f}",
                               color='red', fontsize=10, ha='left', va='center', weight='bold')
 
                       # Check if the band values are finite at this specific last valid step
                       if np.isfinite(upper_band[last_valid_step_index_in_simulation]):
-                           ax.text(final_date, upper_band[last_valid_step_index_in_simulation], f" ${upper_band[last_valid_step_index_in_simulation]:.2f}",
+                           ax.text(final_date_text, upper_band[last_valid_step_index_in_simulation], f" ${upper_band[last_valid_step_index_in_simulation]:.2f}",
                                    color='darkorange', fontsize=9, ha='left', va='bottom')
 
                       if np.isfinite(lower_band[last_valid_step_index_in_simulation]):
-                            ax.text(final_date, lower_band[last_valid_step_index_in_simulation], f" ${lower_band[last_valid_step_index_in_simulation]:.2f}",
+                            ax.text(final_date_text, lower_band[last_valid_step_index_in_simulation], f" ${lower_band[last_valid_step_index_in_simulation]:.2f}",
                                    color='darkorange', fontsize=9, ha='left', va='top')
 
                  else:
@@ -319,27 +350,24 @@ def display_sidebar_results(simulation_results, placeholder):
               risk_reward_ratio = simulation_results.get('risk_reward_ratio', np.nan)
               num_simulations_ran = simulation_results.get('num_simulations_ran', 'N/A')
 
-              if np.isfinite(delta_upper_pct):
-                   st.write(f"Expected movement to +1 Std Dev End: **{delta_upper_pct:.2f}%**")
-              else:
-                   st.write("Expected movement to +1 Std Dev End: **N/A**")
+              # Use format_percentage helper function for display
+              st.write(f"Expected movement to +1 Std Dev End: **{format_percentage(delta_upper_pct, '.2f', 'N/A')}**")
+              st.write(f"Expected movement to -1 Std Dev End: **{format_percentage(delta_lower_pct, '.2f', 'N/A')}**")
 
-              if np.isfinite(delta_lower_pct):
-                   st.write(f"Expected movement to -1 Std Dev End: **{delta_lower_pct:.2f}%**")
-              else:
-                   st.write("Expected movement to -1 Std Dev End: **N/A**")
 
               st.subheader("Risk/Reward")
+              # Format risk/reward ratio
+              risk_reward_str = "N/A"
               if np.isfinite(risk_reward_ratio):
                    if risk_reward_ratio == np.inf:
-                        st.write("Ratio (+1 Gain : -1 Loss): **Infinite**")
+                        risk_reward_str = "Infinite"
                    else:
-                        st.write(f"Ratio (+1 Gain : -1 Loss): **{risk_reward_ratio:.2f} : 1**")
-              # Handle specific NaN cases where delta is finite but ratio is not
+                        risk_reward_str = f"{risk_reward_ratio:.2f} : 1"
               elif np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
-                   st.write("Ratio (+1 Gain : -1 Loss): **Undetermined / Favorable Downside**") # Upper finite, Lower is 0 or positive
-              else:
-                   st.write("Ratio (+1 Gain : -1 Loss): **N/A**")
+                    # If ratio is NaN but deltas are finite, it implies delta_lower_pct was >= 0
+                   risk_reward_str = "Undetermined / Favorable Downside" # e.g. +5% gain, -0.1% loss
+
+              st.write(f"Ratio (+1 Gain : -1 Loss): **{risk_reward_str}**")
 
               st.write(f"*(Based on {num_simulations_ran} runs)*")
          else:
@@ -364,15 +392,21 @@ if st.button("Run Simulation"):
     with st.spinner(f"Running {num_simulations} simulations for {simulation_days} days using EWMA $\lambda$={ewma_lambda}..."):
 
         # Get start price from the data used for analysis
+        # Ensure historical_data_close_analyzed is not empty before trying to get the last price
+        if historical_data_close_analyzed.empty:
+            st.error("Cannot run simulation: Historical data for analysis is empty.")
+            st.session_state.simulation_results = None
+            st.stop()
+
         try:
-            raw_start_price_value = historical_data_close_analyzed.iloc[-1]
-            start_price = float(raw_start_price_value)
+            # Use .iloc[-1].item() to explicitly get the scalar value and avoid FutureWarning
+            start_price = float(historical_data_close_analyzed.iloc[-1].item())
         except (TypeError, ValueError) as e:
-             st.error(f"Unexpected value or type for last historical price before conversion: {e}")
+             st.error(f"Unexpected value or type for last historical price: {e}")
              start_price = np.nan # Set to NaN if conversion fails
 
         if not np.isfinite(start_price) or start_price <= 0:
-             st.error(f"Last historical price ({start_price}) is not a finite positive number after conversion. Cannot start simulation.")
+             st.error(f"Last historical price ({start_price}) is not a finite positive number. Cannot start simulation.")
              # Set session state to None to indicate simulation failed/skipped
              st.session_state.simulation_results = None
              st.stop()
@@ -390,32 +424,34 @@ if st.button("Run Simulation"):
 
         # Prepare dates for simulation results plotting (based on analysis dates)
         historical_dates_analysis = historical_data_close_analyzed.index
+        # Use .max() as it's a DatetimeIndex, result is pandas Timestamp
         last_historical_date_analysis = historical_dates_analysis.max()
 
-        simulated_dates = pd.DatetimeIndex([])
+        simulated_dates_pd = pd.DatetimeIndex([])
         sim_path_length = 0
 
         try:
             # Generate future dates, handling potential errors
             # Increased periods by 1 to include the day *after* the last historical day as the first simulation day
-            simulated_dates = pd.date_range(start=last_historical_date_analysis, periods=simulation_days + 1, freq='B')[1:] # [1:] excludes start date
-            if len(simulated_dates) != simulation_days:
-                 st.warning(f"Could not generate exactly {simulation_days} business days after {last_historical_date_analysis.strftime('%Y-%m-%d')}. Generated {len(simulated_dates)}. Simulation path length will be adjusted.")
-            sim_path_length = len(simulated_dates) + 1 # Add 1 for the starting price point
+            simulated_dates_pd = pd.date_range(start=last_historical_date_analysis, periods=simulation_days + 1, freq='B')[1:] # [1:] excludes start date
+            if len(simulated_dates_pd) != simulation_days:
+                 st.warning(f"Could not generate exactly {simulation_days} business days after {last_historical_date_analysis.strftime('%Y-%m-%d')}. Generated {len(simulated_dates_pd)}. Simulation path length will be adjusted.")
+            sim_path_length = len(simulated_dates_pd) + 1 # Add 1 for the starting price point
         except Exception as date_range_error:
              st.error(f"Error generating future dates for simulation: {date_range_error}. Cannot run simulation.")
              st.session_state.simulation_results = None
              st.stop()
 
         # Prepare the full date axis for plotting (Historical End + Simulated Dates)
-        plot_sim_dates = pd.DatetimeIndex([])
-        if len(simulated_dates) > 0 and sim_path_length > 0:
+        plot_sim_dates_pd = pd.DatetimeIndex([])
+        if len(simulated_dates_pd) > 0 and sim_path_length > 0:
             # Combine the last historical date with the simulated future dates
             last_historical_date_index = pd.DatetimeIndex([last_historical_date_analysis])
-            plot_sim_dates = last_historical_date_index.append(simulated_dates)
+            plot_sim_dates_pd = last_historical_date_index.append(simulated_dates_pd)
 
-            if len(plot_sim_dates) != sim_path_length:
-                 st.error(f"Mismatch between calculated path length ({sim_path_length}) and generated plot dates length ({len(plot_sim_dates)}). Cannot plot.")
+            # Check length consistency
+            if len(plot_sim_dates_pd) != sim_path_length:
+                 st.error(f"Mismatch between calculated path length ({sim_path_length}) and generated plot dates length ({len(plot_sim_dates_pd)}). Cannot plot.")
                  st.session_state.simulation_results = None
                  st.stop()
         else:
@@ -477,7 +513,8 @@ if st.button("Run Simulation"):
         risk_reward_ratio = np.nan
 
         # Ensure last historical price is available and finite (already checked start_price)
-        last_historical_price_scalar = float(historical_data_close_analyzed.iloc[-1]) # Already confirmed finite and positive
+        last_historical_price_scalar = float(historical_data_close_analyzed.iloc[-1].item()) # Use .item()
+
 
         # Ensure final aggregate band values are finite for percentage calculation
         final_upper_price = upper_band[-1] if len(upper_band) > 0 and np.isfinite(upper_band[-1]) else np.nan
@@ -498,7 +535,7 @@ if st.button("Run Simulation"):
 
              if potential_risk_abs > 1e-9: # Check if potential risk is meaningfully positive
                   risk_reward_ratio = potential_reward / potential_risk_abs
-             elif potential_risk_abs <= 1e-9 and potential_reward > 0: # Risk is zero or negative (upside), Reward is positive
+             elif potential_risk_abs >= -1e-9 and potential_reward > 0: # Risk is zero or negative (upside), Reward is positive
                   risk_reward_ratio = np.inf
              # If risk is zero/negative and reward is zero/negative, ratio is undefined/N/A
 
@@ -511,14 +548,14 @@ if st.button("Run Simulation"):
         'mean_float': mean_float, # Store historical stats
         'volatility_float': volatility_float, # Store historical stats (EWMA)
         'ewma_lambda_used': ewma_lambda, # Store lambda used
-        'plot_sim_dates': plot_sim_dates,
+        'plot_sim_dates': plot_sim_dates_pd, # Store pandas DatetimeIndex for plotting/display
         'median_prices': median_prices,
         'mean_prices': mean_prices, # Store aggregate mean for the table
         'std_dev_prices': std_dev_prices, # Store aggregate std dev for the table
         'upper_band': upper_band,
         'lower_band': lower_band,
         'final_prices': final_prices, # List of finite actual final prices
-        'simulated_dates': simulated_dates, # Dates for the simulation period (without start)
+        'simulated_dates': simulated_dates_pd, # Dates for the simulation period (without start)
         'delta_upper_pct': delta_upper_pct, # Store sidebar values
         'delta_lower_pct': delta_lower_pct, # Store sidebar values
         'risk_reward_ratio': risk_reward_ratio, # Store sidebar values
@@ -554,6 +591,7 @@ else:
 # This runs on every rerun. It displays results IF they are in session state.
 display_sidebar_results(st.session_state.simulation_results, sidebar_placeholder)
 
+
 # --- Display Results Table (outside button block, at the bottom) ---
 # This runs on every rerun. It displays the table IF simulation results are in session state.
 if st.session_state.simulation_results is not None:
@@ -570,16 +608,23 @@ if st.session_state.simulation_results is not None:
 
     # --- SAFELY GET LAST HISTORICAL PRICE AND DATE ---
     last_historical_price_scalar = np.nan
-    last_historical_date_analysis = "N/A"
+    last_historical_date_analysis = "N/A" # Keep initial N/A
 
-    if historical_data_analyzed is not None and not historical_data_analyzed.empty:
+    # The pandas ambiguity error was likely triggered here or just before,
+    # if historical_data_analyzed somehow ended up being a Series object that wasn't empty
+    # but was being evaluated in a boolean context unexpectedly.
+    # The check "is not None and not empty" should prevent this.
+    # Let's ensure we only proceed if we have a valid Series
+    if isinstance(historical_data_analyzed, pd.Series) and not historical_data_analyzed.empty:
         try:
-            # Get the last value
+            # Get the last value safely using .item()
             raw_last_value = historical_data_analyzed.iloc[-1]
             # Check if it's finite before converting
             if np.isfinite(raw_last_value):
-                last_historical_price_scalar = float(raw_last_value)
-                last_historical_date_analysis = historical_data_analyzed.index.max()
+                last_historical_price_scalar = float(raw_last_value.item()) # Use .item()
+                # Get the last date safely using .item() if needed, or directly if it's a Timestamp
+                last_historical_date_analysis = historical_data_analyzed.index[-1] # This returns a pandas Timestamp
+
             else:
                  # Handle cases where the last price is NaN or Inf
                  st.warning("Last historical price is non-finite (NaN/Inf), cannot display in table.")
@@ -590,10 +635,10 @@ if st.session_state.simulation_results is not None:
 
     # Get simulation results from stored results
     num_sims_ran = results.get('num_simulations_ran', 'N/A')
-    sim_dates_list = results.get('simulated_dates', []) # List of dates *after* historical end
-    sim_days = len(sim_dates_list) # Number of steps into the future (length of simulated_dates)
-    # Safely get the last simulation date
-    sim_end_date = sim_dates_list.max() if len(sim_dates_list) > 0 and isinstance(sim_dates_list, pd.DatetimeIndex) else "N/A"
+    sim_dates_pd = results.get('simulated_dates', pd.DatetimeIndex([])) # Get the pandas DatetimeIndex
+    sim_days = len(sim_dates_pd) # Number of steps into the future (length of simulated_dates)
+    # Safely get the last simulation date using max() on the DatetimeIndex
+    sim_end_date = sim_dates_pd.max() if len(sim_dates_pd) > 0 else "N/A"
 
 
     # Get aggregate results arrays safely
@@ -643,7 +688,8 @@ if st.session_state.simulation_results is not None:
             'Last Historical Date',      # Added this for clarity
             '--- Simulation Results ---',
             'Number of Simulations',
-            f'Simulation Period (days from {(last_historical_date_analysis.strftime("%Y-%m-%d") if isinstance(last_historical_date_analysis, datetime) else str(last_historical_date_analysis))})',
+            # Reference the last historical date safely
+            f'Simulation Period (days from {(last_historical_date_analysis.strftime("%Y-%m-%d") if isinstance(last_historical_date_analysis, (datetime, pd.Timestamp)) else str(last_historical_date_analysis))})',
             f'Simulation End Date',
             'Simulated Median Ending Price ($)',
             'Simulated Mean Ending Price ($)',
@@ -661,11 +707,11 @@ if st.session_state.simulation_results is not None:
             format_value(hist_mean_log_return, ".6f"),
             format_value(hist_volatility_log, ".6f"),
             format_value(last_historical_price_scalar, ".2f"), # Formatted safely
-            last_historical_date_analysis.strftime('%Y-%m-%d') if isinstance(last_historical_date_analysis, datetime) else str(last_historical_date_analysis), # Date format check
+            last_historical_date_analysis.strftime('%Y-%m-%d') if isinstance(last_historical_date_analysis, (datetime, pd.Timestamp)) else str(last_historical_date_analysis), # Date format check
             '', # Separator
             num_sims_ran,
             sim_days,
-            sim_end_date.strftime('%Y-%m-%d') if isinstance(sim_end_date, datetime) else str(sim_end_date), # Date format check
+            sim_end_date.strftime('%Y-%m-%d') if isinstance(sim_end_date, (datetime, pd.Timestamp)) else str(sim_end_date), # Date format check
             format_value(median_end_price, ".2f"),
             format_value(mean_end_price, ".2f"),
             format_value(std_dev_end, ".2f"),
