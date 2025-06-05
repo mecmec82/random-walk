@@ -554,7 +554,6 @@ else:
 # This runs on every rerun. It displays results IF they are in session state.
 display_sidebar_results(st.session_state.simulation_results, sidebar_placeholder)
 
-
 # --- Display Results Table (outside button block, at the bottom) ---
 # This runs on every rerun. It displays the table IF simulation results are in session state.
 if st.session_state.simulation_results is not None:
@@ -563,23 +562,41 @@ if st.session_state.simulation_results is not None:
     results = st.session_state.simulation_results
 
     # Get historical stats from stored results
-    hist_analysis_days = len(results.get('historical_data_close_analyzed', []))
+    historical_data_analyzed = results.get('historical_data_close_analyzed')
+    hist_analysis_days = len(historical_data_analyzed) if historical_data_analyzed is not None else 0
     hist_mean_log_return = results.get('mean_float', np.nan)
     hist_volatility_log = results.get('volatility_float', np.nan) # This is the EWMA volatility
     ewma_lambda_used = results.get('ewma_lambda_used', 'N/A')
 
-    # Get last historical price safely
-    historical_data_analyzed = results.get('historical_data_close_analyzed')
-    last_historical_price_scalar = float(historical_data_analyzed.iloc[-1]) if historical_data_analyzed is not None and not historical_data_analyzed.empty and np.isfinite(historical_data_analyzed.iloc[-1]) else np.nan
-    last_historical_date_analysis = historical_data_analyzed.index.max() if historical_data_analyzed is not None and not historical_data_analyzed.empty else "N/A"
+    # --- SAFELY GET LAST HISTORICAL PRICE AND DATE ---
+    last_historical_price_scalar = np.nan
+    last_historical_date_analysis = "N/A"
+
+    if historical_data_analyzed is not None and not historical_data_analyzed.empty:
+        try:
+            # Get the last value
+            raw_last_value = historical_data_analyzed.iloc[-1]
+            # Check if it's finite before converting
+            if np.isfinite(raw_last_value):
+                last_historical_price_scalar = float(raw_last_value)
+                last_historical_date_analysis = historical_data_analyzed.index.max()
+            else:
+                 # Handle cases where the last price is NaN or Inf
+                 st.warning("Last historical price is non-finite (NaN/Inf), cannot display in table.")
+        except Exception as e:
+            st.error(f"Error processing last historical price or date for table: {e}")
+            # Keep them as np.nan / "N/A"
 
 
     # Get simulation results from stored results
     num_sims_ran = results.get('num_simulations_ran', 'N/A')
-    sim_dates_list = results.get('simulated_dates', [])
-    sim_days = len(sim_dates_list) # Number of steps into the future
-    sim_end_date = sim_dates_list.max() if len(sim_dates_list) > 0 else "N/A"
+    sim_dates_list = results.get('simulated_dates', []) # List of dates *after* historical end
+    sim_days = len(sim_dates_list) # Number of steps into the future (length of simulated_dates)
+    # Safely get the last simulation date
+    sim_end_date = sim_dates_list.max() if len(sim_dates_list) > 0 and isinstance(sim_dates_list, pd.DatetimeIndex) else "N/A"
 
+
+    # Get aggregate results arrays safely
     median_prices_array = results.get('median_prices', np.array([]))
     mean_prices_array = results.get('mean_prices', np.array([]))
     std_dev_prices_array = results.get('std_dev_prices', np.array([]))
@@ -587,15 +604,17 @@ if st.session_state.simulation_results is not None:
     lower_band_array = results.get('lower_band', np.array([]))
     final_prices_list = results.get('final_prices', []) # List of finite actual final prices
 
-    # Safely get final values from arrays
+    # Safely get final values from aggregate arrays
     median_end_price = median_prices_array[-1] if len(median_prices_array) > 0 and np.isfinite(median_prices_array[-1]) else np.nan
     mean_end_price = mean_prices_array[-1] if len(mean_prices_array) > 0 and np.isfinite(mean_prices_array[-1]) else np.nan
     std_dev_end = std_dev_prices_array[-1] if len(std_dev_prices_array) > 0 and np.isfinite(std_dev_prices_array[-1]) else np.nan
     upper_band_end_price = upper_band_array[-1] if len(upper_band_array) > 0 and np.isfinite(upper_band_array[-1]) else np.nan
     lower_band_end_price = lower_band_array[-1] if len(lower_band_array) > 0 and np.isfinite(lower_band_array[-1]) else np.nan
 
+    # Safely get min/max from the list of *actual* final prices
     actual_min_end_price = np.min(final_prices_list) if final_prices_list else np.nan
     actual_max_end_price = np.max(final_prices_list) if final_prices_list else np.nan
+
 
     delta_upper_pct = results.get('delta_upper_pct', np.nan)
     delta_lower_pct = results.get('delta_lower_pct', np.nan)
@@ -603,11 +622,25 @@ if st.session_state.simulation_results is not None:
 
 
     # Prepare data for the table
+    # Use helper function or logic to format values safely, handling np.nan
+    def format_value(value, format_str=".2f", default="N/A"):
+        if np.isfinite(value):
+            return format(value, format_str)
+        return default
+
+    def format_percentage(value, format_str=".2f", default="N/A"):
+         if np.isfinite(value):
+              return f"{format(value, format_str)}%"
+         return default
+
+
     table_data = {
         'Metric': [
             'Historical Analysis Period (days)',
             'Historical Mean Daily Log Return',
-            f'EWMA Daily Log Volatility ($\lambda$={ewma_lambda_used})', # Update text
+            f'EWMA Daily Log Volatility ($\lambda$={ewma_lambda_used})',
+            'Last Historical Price ($)', # Added this for clarity
+            'Last Historical Date',      # Added this for clarity
             '--- Simulation Results ---',
             'Number of Simulations',
             f'Simulation Period (days from {(last_historical_date_analysis.strftime("%Y-%m-%d") if isinstance(last_historical_date_analysis, datetime) else str(last_historical_date_analysis))})',
@@ -625,22 +658,24 @@ if st.session_state.simulation_results is not None:
         ],
         'Value': [
             hist_analysis_days,
-            f"{hist_mean_log_return:.6f}" if np.isfinite(hist_mean_log_return) else "N/A",
-            f"{hist_volatility_log:.6f}" if np.isfinite(hist_volatility_log) else "N/A",
+            format_value(hist_mean_log_return, ".6f"),
+            format_value(hist_volatility_log, ".6f"),
+            format_value(last_historical_price_scalar, ".2f"), # Formatted safely
+            last_historical_date_analysis.strftime('%Y-%m-%d') if isinstance(last_historical_date_analysis, datetime) else str(last_historical_date_analysis), # Date format check
             '', # Separator
             num_sims_ran,
             sim_days,
-            sim_end_date.strftime('%Y-%m-%d') if isinstance(sim_end_date, datetime) else str(sim_end_date),
-            f"{median_end_price:.2f}" if np.isfinite(median_end_price) else "N/A",
-            f"{mean_end_price:.2f}" if np.isfinite(mean_end_price) else "N/A",
-            f"{std_dev_end:.2f}" if np.isfinite(std_dev_end) else "N/A",
-            f"{upper_band_end_price:.2f}" if np.isfinite(upper_band_end_price) else "N/A",
-            f"{lower_band_end_price:.2f}" if np.isfinite(lower_band_end_price) else "N/A",
-            f"{actual_min_end_price:.2f}" if np.isfinite(actual_min_end_price) else "N/A",
-            f"{actual_max_end_price:.2f}" if np.isfinite(actual_max_end_price) else "N/A",
-            f"{delta_upper_pct:.2f}%" if np.isfinite(delta_upper_pct) else "N/A",
-            f"{delta_lower_pct:.2f}%" if np.isfinite(delta_lower_pct) else "N/A",
-            f"{risk_reward_ratio_val:.2f} : 1" if np.isfinite(risk_reward_ratio_val) and risk_reward_ratio_val != np.inf else ("Infinite" if risk_reward_ratio_val == np.inf else "N/A"),
+            sim_end_date.strftime('%Y-%m-%d') if isinstance(sim_end_date, datetime) else str(sim_end_date), # Date format check
+            format_value(median_end_price, ".2f"),
+            format_value(mean_end_price, ".2f"),
+            format_value(std_dev_end, ".2f"),
+            format_value(upper_band_end_price, ".2f"),
+            format_value(lower_band_end_price, ".2f"),
+            format_value(actual_min_end_price, ".2f"),
+            format_value(actual_max_end_price, ".2f"),
+            format_percentage(delta_upper_pct, ".2f"),
+            format_percentage(delta_lower_pct, ".2f"),
+            f"{format_value(risk_reward_ratio_val, '.2f')} : 1" if np.isfinite(risk_reward_ratio_val) and risk_reward_ratio_val != np.inf else ("Infinite" if risk_reward_ratio_val == np.inf else "N/A"),
         ]
     }
 
