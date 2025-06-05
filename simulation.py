@@ -179,8 +179,16 @@ with st.spinner("Calculating historical statistics (including EWMA volatility)..
     # Type and finiteness checks for calculated values
     # Use .item() for the mean to address FutureWarning
     try:
-        mean_float = float(mean_daily_log_return.item())
+        # Check if mean_daily_log_return is a pandas Series (it should be a float/scalar from .mean())
+        # If it's a Series of length 1 (unexpected), use .item()
+        if isinstance(mean_daily_log_return, pd.Series):
+             st.warning("Mean daily log return is a Series, extracting item.")
+             mean_float = float(mean_daily_log_return.item())
+        else: # Should be a standard float/numpy scalar
+            mean_float = float(mean_daily_log_return)
+
         volatility_float = float(daily_log_volatility) # daily_log_volatility is already scalar float here
+
     except (TypeError, ValueError) as e:
          st.error(f"Unexpected value or type for calculated mean or volatility after EWMA: {e}")
          st.info(f"Mean value: {mean_daily_log_return}, Mean type: {type(mean_daily_log_return)}")
@@ -215,6 +223,19 @@ historical_days_to_display = st.sidebar.slider(
 st.sidebar.header("Simulation Insights")
 sidebar_placeholder = st.sidebar.empty() # Create a placeholder to update results
 
+
+# --- Helper functions for formatting values safely ---
+def format_value(value, format_str=".2f", default="N/A"):
+    """Formats a numerical value, returning default if non-finite."""
+    if np.isfinite(value):
+        return format(value, format_str)
+    return default
+
+def format_percentage(value, format_str=".2f", default="N/A"):
+     """Formats a numerical value as a percentage, returning default if non-finite."""
+     if np.isfinite(value):
+          return f"{format(value, format_str)}%"
+     return default
 
 
 # --- Define the plotting function ---
@@ -337,6 +358,7 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
 
 # --- Define functions to display results ---
 # These functions read from session state and display results
+# They now use the moved helper functions
 
 def display_sidebar_results(simulation_results, placeholder):
      # Clear previous sidebar results
@@ -350,7 +372,7 @@ def display_sidebar_results(simulation_results, placeholder):
               risk_reward_ratio = simulation_results.get('risk_reward_ratio', np.nan)
               num_simulations_ran = simulation_results.get('num_simulations_ran', 'N/A')
 
-              # Use format_percentage helper function for display
+              # Use format_percentage helper function for display (NOW DEFINED ABOVE)
               st.write(f"Expected movement to +1 Std Dev End: **{format_percentage(delta_upper_pct, '.2f', 'N/A')}**")
               st.write(f"Expected movement to -1 Std Dev End: **{format_percentage(delta_lower_pct, '.2f', 'N/A')}**")
 
@@ -589,6 +611,7 @@ else:
 
 # --- Display Sidebar Results (outside button block) ---
 # This runs on every rerun. It displays results IF they are in session state.
+# This call now happens AFTER format_value and format_percentage are defined.
 display_sidebar_results(st.session_state.simulation_results, sidebar_placeholder)
 
 
@@ -601,7 +624,7 @@ if st.session_state.simulation_results is not None:
 
     # Get historical stats from stored results
     historical_data_analyzed = results.get('historical_data_close_analyzed')
-    hist_analysis_days = len(historical_data_analyzed) if historical_data_analyzed is not None else 0
+    hist_analysis_days = len(historical_data_analyzed) if isinstance(historical_data_analyzed, pd.Series) else 0 # Safe length check
     hist_mean_log_return = results.get('mean_float', np.nan)
     hist_volatility_log = results.get('volatility_float', np.nan) # This is the EWMA volatility
     ewma_lambda_used = results.get('ewma_lambda_used', 'N/A')
@@ -610,11 +633,7 @@ if st.session_state.simulation_results is not None:
     last_historical_price_scalar = np.nan
     last_historical_date_analysis = "N/A" # Keep initial N/A
 
-    # The pandas ambiguity error was likely triggered here or just before,
-    # if historical_data_analyzed somehow ended up being a Series object that wasn't empty
-    # but was being evaluated in a boolean context unexpectedly.
-    # The check "is not None and not empty" should prevent this.
-    # Let's ensure we only proceed if we have a valid Series
+    # Ensure historical_data_analyzed is a non-empty Series before accessing iloc
     if isinstance(historical_data_analyzed, pd.Series) and not historical_data_analyzed.empty:
         try:
             # Get the last value safely using .item()
@@ -668,15 +687,7 @@ if st.session_state.simulation_results is not None:
 
     # Prepare data for the table
     # Use helper function or logic to format values safely, handling np.nan
-    def format_value(value, format_str=".2f", default="N/A"):
-        if np.isfinite(value):
-            return format(value, format_str)
-        return default
-
-    def format_percentage(value, format_str=".2f", default="N/A"):
-         if np.isfinite(value):
-              return f"{format(value, format_str)}%"
-         return default
+    # These helper functions are now defined BEFORE they are called
 
 
     table_data = {
