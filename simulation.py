@@ -583,7 +583,7 @@ if st.button("Run Simulation"):
              delta_lower_pct_2std = ((final_lower_price_2std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
         # Risk/Reward Ratio (Handle division by zero or negative risk)
-        if np.isfinite(delta_upper_pct_2std) and np.isfinite(delta_lower_pct):
+        if np.isfinite(delta_upper_pct_2std) and np.isfinite(delta_lower_pct_2std):
              potential_reward = delta_upper_pct_2std
              potential_risk_abs = -delta_lower_pct_2std # Absolute magnitude of downside movement
 
@@ -789,8 +789,8 @@ if st.session_state.simulation_results is not None: # <-- Corrected typo here
             'Simulated -2 Std Dev Ending Price ($)',
             'Actual Min Simulated Ending Price ($)',
             'Actual Max Simulated Ending Price ($)',
-            'Expected movement to +1 Std Dev End (%)', # Keep in table for summary
-            'Expected movement to -1 Std Dev End (%)', # Keep in table for summary
+            'Expected movement to +2 Std Dev End (%)', # Keep in table for summary
+            'Expected movement to -2 Std Dev End (%)', # Keep in table for summary
             'Risk/Reward Ratio (+1 Gain : -1 Loss)', # Keep in table for summary
         ],
         'Value': [
