@@ -60,7 +60,7 @@ ticker = st.sidebar.text_input("Ticker Symbol (e.g., SPY, BTC-USD)", 'BTC-USD').
 historical_days_requested = st.sidebar.number_input("Historical Trading Days for Analysis", min_value=100, value=900, step=100)
 
 simulation_days = st.sidebar.number_input("Future Simulation Days", min_value=1, value=30, step=1)
-num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_value=1, value=200, step=10)
+num_simulations = st.sidebar.number_input("Number of Simulations to Run", min_value=1, value=10000, step=10)
 
 # EWMA specific parameter
 ewma_lambda = st.sidebar.slider(
@@ -216,7 +216,7 @@ with st.spinner("Calculating historical statistics (including EWMA volatility)..
         # Check if mean_daily_log_return is a pandas Series (it should be a float/numpy scalar from .mean())
         # If it's a Series of length 1 (unexpected), use .item()
         if isinstance(mean_daily_log_return, pd.Series):
-             st.warning("Mean daily log return is a Series, extracting item.")
+             #st.warning("Mean daily log return is a Series, extracting item.")
              mean_float = float(mean_daily_log_return.item())
         else: # Should be a standard float/numpy scalar
             mean_float = float(mean_daily_log_return)
