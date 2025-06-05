@@ -572,7 +572,7 @@ if st.button("Run Simulation"):
         final_upper_price_1std = upper_band[-1] if len(upper_band_2std) > 0 and np.isfinite(upper_band_2std[-1]) else np.nan
         final_lower_price_1std = lower_band[-1] if len(lower_band_2std) > 0 and np.isfinite(lower_band_2std[-1]) else np.nan
         final_upper_price_2std = upper_band[-1] if len(upper_band_2std) > 0 and np.isfinite(upper_band_2std[-1]) else np.nan
-        final_lower_price_2std = lower_band[-1] if len(lower_band_2std) > 0 and np.isfinite(lower_ban_2std[-1]) else np.nan
+        final_lower_price_2std = lower_band[-1] if len(lower_band_2std) > 0 and np.isfinite(lower_band_2std[-1]) else np.nan
 
         # Percentage Delta to +1 Std Dev
         if np.isfinite(final_upper_price_1std) and last_historical_price_scalar > 0:
