@@ -32,9 +32,9 @@ with st.expander("📊 How this simulation works"):
     4.  **Monte Carlo Approach:** The simulation is repeated many times (`Number of Simulations to Run`). Each simulation run generates a different possible price path because of the random component.
     5.  **Aggregation and Results:**
         *   Instead of showing hundreds of individual paths (which would be messy), the app calculates the **median** price across all simulations at each future time step. This gives a sense of the most 'typical' outcome.
-        *   It also calculates a **standard deviation band** around the mean price at each step. This band indicates the typical spread of outcomes. Roughly 68% of simulated paths are expected to stay within the +/- 1 Standard Deviation band *if the underlying assumptions held perfectly*.
-        *   Key metrics like the expected price movement to the edge of the band and a Risk/Reward ratio are calculated based on the simulation's final step aggregates.
-    6.  **Plotting and Summary:** The historical data (you can adjust how many historical days are *displayed* on the plot using a separate slider, without changing the analysis period) is plotted alongside the simulated median path and the standard deviation band. A table provides a summary of the historical analysis parameters and the key simulation results.
+        *   It also calculates **standard deviation bands** (+/- 1 and +/- 2 standard deviations) around the mean price at each step. These bands indicate the typical spread of outcomes. Roughly 68% of simulated paths are expected to stay within the +/- 1 Std Dev band, and 95% within the +/- 2 Std Dev band, *if the underlying assumptions held perfectly*.
+        *   Key metrics like the expected price movement to the edge of the +/- 1 Std Dev band and a Risk/Reward ratio based on the +/- 1 Std Dev endpoints are calculated from the simulation's final step aggregates.
+    6.  **Plotting and Summary:** The historical data (you can adjust how many historical days are *displayed* on the plot using a separate slider, without changing the analysis period) is plotted alongside the simulated median path and the standard deviation bands. A table provides a summary of the historical analysis parameters and the key simulation results.
 
     **Important Considerations:**
 
@@ -295,47 +295,65 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
          # Use .get() with default values in case keys are missing due to errors
          plot_sim_dates_pd = simulation_results.get('plot_sim_dates')
          median_prices = simulation_results.get('median_prices')
-         upper_band = simulation_results.get('upper_band')
-         lower_band = simulation_results.get('lower_band')
+         mean_prices = simulation_results.get('mean_prices') # Need mean for bands
+         std_dev_prices = simulation_results.get('std_dev_prices') # Need std dev for bands
+         upper_band = simulation_results.get('upper_band') # This is +1 std dev
+         lower_band = simulation_results.get('lower_band') # This is -1 std dev
+         upper_band_2std = simulation_results.get('upper_band_2std') # New: +2 std dev
+         lower_band_2std = simulation_results.get('lower_band_2std') # New: -2 std dev
          num_simulations_ran = simulation_results.get('num_simulations_ran', 'N/A') # Get the actual number of sims ran
 
          # Check if plotting aggregates is possible based on the simulation results
-         # Need dates, median, upper, and lower bands of consistent length and not empty
+         # Need dates, median, mean, std_dev and bands of consistent length and not empty
          # Convert plot_sim_dates to numpy array
          plot_sim_dates_np = plot_sim_dates_pd.values if plot_sim_dates_pd is not None else np.array([])
 
 
          if (len(plot_sim_dates_np) > 0 and
              median_prices is not None and len(median_prices) == len(plot_sim_dates_np) and np.isfinite(median_prices).any() and
+             mean_prices is not None and len(mean_prices) == len(plot_sim_dates_np) and
+             std_dev_prices is not None and len(std_dev_prices) == len(plot_sim_dates_np) and
              upper_band is not None and len(upper_band) == len(plot_sim_dates_np) and
-             lower_band is not None and len(lower_band) == len(plot_sim_dates_np)):
+             lower_band is not None and len(lower_band) == len(plot_sim_dates_np) and
+             upper_band_2std is not None and len(upper_band_2std) == len(plot_sim_dates_np) and # Check new bands
+             lower_band_2std is not None and len(lower_band_2std) == len(plot_sim_dates_np)):
 
 
-              # Filter points where median is finite for plotting line and band
-              # Note: The validity check here is only on the median for drawing the line/band based on it
+              # Filter points where median is finite for plotting line and bands
+              # Note: The validity check here is primarily on the median for drawing the lines/bands based on it
               valid_plot_indices = np.isfinite(median_prices)
 
               # Apply filter to all related arrays
               plot_sim_dates_valid = plot_sim_dates_np[valid_plot_indices]
               median_prices_valid = median_prices[valid_plot_indices]
+              mean_prices_valid = mean_prices[valid_plot_indices]
+              std_dev_prices_valid = std_dev_prices[valid_plot_indices]
               upper_band_valid = upper_band[valid_plot_indices]
               lower_band_valid = lower_band[valid_plot_indices]
+              upper_band_2std_valid = upper_band_2std[valid_plot_indices] # Filter new bands
+              lower_band_2std_valid = lower_band_2std[valid_plot_indices] # Filter new bands
 
 
               if len(plot_sim_dates_valid) > 0:
-                 ax.plot(plot_sim_dates_valid, median_prices_valid, label=f'Median Simulated Price ({num_simulations_ran} runs)', color='red', linestyle='-', linewidth=2)
-
-                 # Ensure bands also have valid finite points corresponding to the valid median points
-                 if np.isfinite(upper_band_valid).all() and np.isfinite(lower_band_valid).all():
-                      ax.fill_between(plot_sim_dates_valid, lower_band_valid, upper_band_valid, color='orange', alpha=0.3, label='+1/-1 Std Dev Band') # Changed label
+                 # Plot +/- 2 Std Dev Band FIRST (behind +/- 1)
+                 if np.isfinite(upper_band_2std_valid).all() and np.isfinite(lower_band_2std_valid).all():
+                      ax.fill_between(plot_sim_dates_valid, lower_band_2std_valid, upper_band_2std_valid, color='gold', alpha=0.2, label='+/- 2 Std Dev Band') # Use a lighter color/alpha
                  else:
-                      # Check if only the end points of the bands are NaN, but inner points are finite
-                      # This is complex to plot segment-by-segment. Simpler to skip the band if any corresponding points are non-finite.
-                      st.warning("Std dev band contains non-finite values where median is finite. Band will not be plotted or may be incomplete.")
+                      st.warning("+/- 2 Std dev band contains non-finite values where median is finite. Band will not be plotted or may be incomplete.")
+
+                 # Plot +/- 1 Std Dev Band SECOND
+                 if np.isfinite(upper_band_valid).all() and np.isfinite(lower_band_valid).all():
+                      ax.fill_between(plot_sim_dates_valid, lower_band_valid, upper_band_valid, color='darkorange', alpha=0.3, label='+/- 1 Std Dev Band') # Use darker color/alpha
+                 else:
+                      st.warning("+/- 1 Std dev band contains non-finite values where median is finite. Band will not be plotted or may be incomplete.")
+
+
+                 # Plot Median line LAST (on top)
+                 ax.plot(plot_sim_dates_valid, median_prices_valid, label=f'Median Simulated Price ({num_simulations_ran} runs)', color='red', linestyle='-', linewidth=2)
 
 
                  # --- Add Labels at the end ---
-                 # Find the last step index where median is finite
+                 # Find the last step index where median is finite (use original, unfiltered index)
                  last_valid_step_index_in_simulation = len(median_prices) - 1
                  while last_valid_step_index_in_simulation >= 0 and not np.isfinite(median_prices[last_valid_step_index_in_simulation]):
                       last_valid_step_index_in_simulation -= 1
@@ -348,7 +366,7 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
                       ax.text(final_date_text, final_median_price, f" ${final_median_price:.2f}",
                               color='red', fontsize=10, ha='left', va='center', weight='bold')
 
-                      # Check if the band values are finite at this specific last valid step
+                      # Check and add labels for +/- 1 Std Dev band endpoints
                       if np.isfinite(upper_band[last_valid_step_index_in_simulation]):
                            ax.text(final_date_text, upper_band[last_valid_step_index_in_simulation], f" ${upper_band[last_valid_step_index_in_simulation]:.2f}",
                                    color='darkorange', fontsize=9, ha='left', va='bottom')
@@ -357,12 +375,22 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
                             ax.text(final_date_text, lower_band[last_valid_step_index_in_simulation], f" ${lower_band[last_valid_step_index_in_simulation]:.2f}",
                                    color='darkorange', fontsize=9, ha='left', va='top')
 
+                      # Check and add labels for +/- 2 Std Dev band endpoints
+                      if np.isfinite(upper_band_2std[last_valid_step_index_in_simulation]):
+                           ax.text(final_date_text, upper_band_2std[last_valid_step_index_in_simulation], f" ${upper_band_2std[last_valid_step_index_in_simulation]:.2f}",
+                                   color='goldenrod', fontsize=9, ha='left', va='bottom') # Use color matching +/- 2 band fill
+
+                      if np.isfinite(lower_band_2std[last_valid_step_index_in_simulation]):
+                            ax.text(final_date_text, lower_band_2std[last_valid_step_index_in_simulation], f" ${lower_band_2std[last_valid_step_index_in_simulation]:.2f}",
+                                   color='goldenrod', fontsize=9, ha='left', va='top') # Use color matching +/- 2 band fill
+
+
                  else:
                      st.warning("Median simulated data contains no finite points, skipping end labels.")
 
                  ax.legend()
               else:
-                   st.warning("No finite aggregate simulation data points available to plot the median line/band.")
+                   st.warning("No finite aggregate simulation data points available to plot the median line/bands.")
 
 
          else:
@@ -386,16 +414,57 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
     return fig
 
 
+# --- Define functions to display results ---
+# These functions read from session state and display results
+# They now use the moved helper functions
+
+def display_sidebar_results(simulation_results, placeholder):
+     # Clear previous sidebar results
+     placeholder.empty()
+     with placeholder.container():
+         st.subheader("Key Forecasts")
+         if simulation_results is not None:
+              # Use .get() with default values in case keys are missing due to errors
+              delta_upper_pct = simulation_results.get('delta_upper_pct', np.nan)
+              delta_lower_pct = simulation_results.get('delta_lower_pct', np.nan)
+              risk_reward_ratio = simulation_results.get('risk_reward_ratio', np.nan)
+              num_simulations_ran = simulation_results.get('num_simulations_ran', 'N/A')
+
+              # Use format_percentage helper function for display (NOW DEFINED ABOVE)
+              st.write(f"Expected movement to +1 Std Dev End: **{format_percentage(delta_upper_pct, '.2f', 'N/A')}**")
+              st.write(f"Expected movement to -1 Std Dev End: **{format_percentage(delta_lower_pct, '.2f', 'N/A')}**")
+
+
+              st.subheader("Risk/Reward")
+              # Format risk/reward ratio
+              risk_reward_str = "N/A"
+              if np.isfinite(risk_reward_ratio):
+                   if risk_reward_ratio == np.inf:
+                        risk_reward_str = "Infinite"
+                   else:
+                        risk_reward_str = f"{risk_reward_ratio:.2f} : 1"
+              elif np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
+                    # If ratio is NaN but deltas are finite, it implies delta_lower_pct was >= 0
+                   risk_reward_str = "Undetermined / Favorable Downside" # e.g. +5% gain, -0.1% loss
+
+              st.write(f"Ratio (+1 Gain : -1 Loss): **{risk_reward_str}**")
+
+              st.write(f"*(Based on {num_simulations_ran} runs)*")
+         else:
+              # Display initial message if no simulation run yet
+              st.info("Click 'Run Simulation' to see forecasts.")
+
+
 # --- Main Execution Flow (runs on every rerun) ---
 
-# The code up to here (Inputs, Fetch, Analysis Calculation, Slider Definition, Historical Analysis Results Display) runs on every rerun.
+# The code up to here (Inputs, Fetch, Analysis Calculation, Slider Definition) runs on every rerun.
 
 # --- Button to Run Simulation ---
 # This block runs ONLY when the button is clicked
 if st.button("Run Simulation"):
     # Clear previous sidebar results visual (placeholder) - No sidebar placeholder needed anymore
     # Clear previous simulation results from session state
-    st.session_state.simulation_results = None # Clear old results
+    st.session_session_results = None # Clear old results
 
     # --- Calculate Simulation Aggregates (Heavy Computation) ---
     # This happens once per button click
@@ -405,7 +474,7 @@ if st.button("Run Simulation"):
         # Ensure historical_data_close_analyzed is not empty before trying to get the last price
         if historical_data_close_analyzed.empty:
             st.error("Cannot run simulation: Historical data for analysis is empty.")
-            st.session_state.simulation_results = None
+            st.session_session_results = None
             st.stop()
 
         try:
@@ -418,7 +487,7 @@ if st.button("Run Simulation"):
         if not np.isfinite(start_price) or start_price <= 0:
              st.error(f"Last historical price ({start_price}) is not a finite positive number. Cannot start simulation.")
              # Set session state to None to indicate simulation failed/skipped
-             st.session_state.simulation_results = None
+             st.session_session_results = None
              st.stop()
 
         # Ensure the pre-calculated mean and volatility are finite and volatility is positive
@@ -428,7 +497,7 @@ if st.button("Run Simulation"):
 
         if not np.isfinite(loc_sim) or not np.isfinite(scale_sim) or scale_sim <= 0:
              st.error(f"Calculated historical mean ({loc_sim:.6f}) or EWMA volatility ({scale_sim:.6f}) is not finite or volatility is not positive. Cannot run simulation.")
-             st.session_state.simulation_results = None
+             st.session_session_results = None
              st.stop()
 
 
@@ -449,7 +518,7 @@ if st.button("Run Simulation"):
             sim_path_length = len(simulated_dates_pd) + 1 # Add 1 for the starting price point
         except Exception as date_range_error:
              st.error(f"Error generating future dates for simulation: {date_range_error}. Cannot run simulation.")
-             st.session_state.simulation_results = None
+             st.session_session_results = None
              st.stop()
 
         # Prepare the full date axis for plotting (Historical End + Simulated Dates)
@@ -462,11 +531,11 @@ if st.button("Run Simulation"):
             # Check length consistency
             if len(plot_sim_dates_pd) != sim_path_length:
                  st.error(f"Mismatch between calculated path length ({sim_path_length}) and generated plot dates length ({len(plot_sim_dates_pd)}). Cannot plot.")
-                 st.session_state.simulation_results = None
+                 st.session_session_results = None
                  st.stop()
         else:
              st.error("Skipping simulation as future dates could not be generated or have zero length.")
-             st.session_state.simulation_results = None
+             st.session_session_results = None
              st.stop()
 
 
@@ -510,8 +579,11 @@ if st.button("Run Simulation"):
         std_dev_prices = np.nanstd(prices_at_each_step, axis=1)
 
         # Calculate upper/lower bands based on mean +/- std dev
-        upper_band = mean_prices + std_dev_prices
-        lower_band = mean_prices - std_dev_prices
+        upper_band = mean_prices + std_dev_prices # +1 Std Dev
+        lower_band = mean_prices - std_dev_prices # -1 Std Dev
+        upper_band_2std = mean_prices + 2 * std_dev_prices # New: +2 Std Dev
+        lower_band_2std = mean_prices - 2 * std_dev_prices # New: -2 Std Dev
+
 
         # Filter final prices to exclude non-finite values (robustness)
         final_prices = [price for price in final_prices_list_raw if np.isfinite(price)]
@@ -527,16 +599,17 @@ if st.button("Run Simulation"):
 
 
         # Ensure final aggregate band values are finite for percentage calculation
-        final_upper_price = upper_band[-1] if len(upper_band) > 0 and np.isfinite(upper_band[-1]) else np.nan
-        final_lower_price = lower_band[-1] if len(lower_band) > 0 and np.isfinite(lower_band[-1]) else np.nan
+        # Risk/Reward and +/- 1 Std Dev movement are based on +/- 1 band endpoints
+        final_upper_price_1std = upper_band[-1] if len(upper_band) > 0 and np.isfinite(upper_band[-1]) else np.nan
+        final_lower_price_1std = lower_band[-1] if len(lower_band) > 0 and np.isfinite(lower_band[-1]) else np.nan
 
         # Percentage Delta to +1 Std Dev
-        if np.isfinite(final_upper_price) and last_historical_price_scalar > 0:
-             delta_upper_pct = ((final_upper_price - last_historical_price_scalar) / last_historical_price_scalar) * 100
+        if np.isfinite(final_upper_price_1std) and last_historical_price_scalar > 0:
+             delta_upper_pct = ((final_upper_price_1std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
         # Percentage Delta to -1 Std Dev
-        if np.isfinite(final_lower_price) and last_historical_price_scalar > 0:
-             delta_lower_pct = ((final_lower_price - last_historical_price_scalar) / last_historical_price_scalar) * 100
+        if np.isfinite(final_lower_price_1std) and last_historical_price_scalar > 0:
+             delta_lower_pct = ((final_lower_price_1std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
         # Risk/Reward Ratio (Handle division by zero or negative risk)
         if np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
@@ -553,7 +626,7 @@ if st.button("Run Simulation"):
     # --- Store Results in Session State ---
     # This makes the results available for the plotting and display functions on the next rerun
     # Store all necessary variables, including the original data used for analysis summary
-    st.session_state.simulation_results = {
+    st.session_session_results = {
         'historical_data_close_analyzed': historical_data_close_analyzed, # Store this too for the final table
         'mean_float': mean_float, # Store historical stats
         'volatility_float': volatility_float, # Store historical stats (EWMA)
@@ -562,13 +635,15 @@ if st.button("Run Simulation"):
         'median_prices': median_prices,
         'mean_prices': mean_prices, # Store aggregate mean for the table
         'std_dev_prices': std_dev_prices, # Store aggregate std dev for the table
-        'upper_band': upper_band,
-        'lower_band': lower_band,
+        'upper_band': upper_band, # Store +1 std dev band
+        'lower_band': lower_band, # Store -1 std dev band
+        'upper_band_2std': upper_band_2std, # New: Store +2 std dev band
+        'lower_band_2std': lower_band_2std, # New: Store -2 std dev band
         'final_prices': final_prices, # List of finite actual final prices
         'simulated_dates': simulated_dates_pd, # Dates for the simulation period (without start)
-        'delta_upper_pct': delta_upper_pct, # Store sidebar values
-        'delta_lower_pct': delta_lower_pct, # Store sidebar values
-        'risk_reward_ratio': risk_reward_ratio, # Store sidebar values
+        'delta_upper_pct': delta_upper_pct, # Store sidebar values (+1 std dev based)
+        'delta_lower_pct': delta_lower_pct, # Store sidebar values (-1 std dev based)
+        'risk_reward_ratio': risk_reward_ratio, # Store sidebar values (+1/-1 std dev based)
         'num_simulations_ran': num_simulations, # Store number of sims run for display
     }
     #st.success("Simulation completed and results stored.")
@@ -579,10 +654,14 @@ if st.button("Run Simulation"):
 
 # The code up to here (Inputs, Fetch, Analysis Calculation, Slider Definition) runs on every rerun.
 
+
 # --- Display Risk/Reward and Key Forecasts (outside button block) ---
 # This runs on every rerun if simulation results are in session state
+# Moved from sidebar
 if st.session_state.simulation_results is not None:
-    results = st.session_state.simulation_results
+    results = st.session_session_results # Use session_session_results here
+
+    # Use .get() with default values in case keys are missing due to errors
     delta_upper_pct = results.get('delta_upper_pct', np.nan)
     delta_lower_pct = results.get('delta_lower_pct', np.nan)
     risk_reward_ratio = results.get('risk_reward_ratio', np.nan)
@@ -594,10 +673,12 @@ if st.session_state.simulation_results is not None:
     col1, col2, col3 = st.columns(3) # Use columns for better layout
 
     with col1:
+        # Use format_percentage helper function for display
         st.metric(label="Expected movement to +1 Std Dev End", value=format_percentage(delta_upper_pct, '.2f', 'N/A'))
     with col2:
         st.metric(label="Expected movement to -1 Std Dev End", value=format_percentage(delta_lower_pct, '.2f', 'N/A'))
     with col3:
+        # Format risk/reward ratio
         risk_reward_str = "N/A"
         if np.isfinite(risk_reward_ratio):
              if risk_reward_ratio == np.inf:
@@ -606,7 +687,7 @@ if st.session_state.simulation_results is not None:
                   risk_reward_str = f"{risk_reward_ratio:.2f} : 1"
         elif np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
               # If ratio is NaN but deltas are finite, it implies delta_lower_pct was >= 0
-              risk_reward_str = "Undetermined / Favorable Downside" # e.g. +5% gain, -0.1% loss
+             risk_reward_str = "Undetermined / Favorable Downside" # e.g. +5% gain, -0.1% loss
 
         st.metric(label="Risk/Reward Ratio (+1 Gain : -1 Loss)", value=risk_reward_str)
 
@@ -620,7 +701,7 @@ if full_historical_data is not None and not full_historical_data.empty:
     fig = plot_simulation(
         full_historical_data,
         historical_days_to_display,
-        st.session_state.simulation_results,
+        st.session_session_results, # Pass session_session_results
         ticker, # Pass ticker
         historical_data_close_analyzed, # Pass analyzed data for count in title
         ewma_lambda # Pass lambda for title
@@ -638,10 +719,10 @@ else:
 
 # --- Display Results Table (outside button block, at the bottom) ---
 # This runs on every rerun. It displays the table IF simulation results are in session state.
-if st.session_state.simulation_results is not None:
+if st.session_session_results is not None: # Use session_session_results here
     st.subheader("Simulation and Analysis Summary")
 
-    results = st.session_state.simulation_results
+    results = st.session_session_results # Use session_session_results here
 
     # Get historical stats from stored results
     historical_data_analyzed = results.get('historical_data_close_analyzed')
@@ -685,22 +766,27 @@ if st.session_state.simulation_results is not None:
     median_prices_array = results.get('median_prices', np.array([]))
     mean_prices_array = results.get('mean_prices', np.array([]))
     std_dev_prices_array = results.get('std_dev_prices', np.array([]))
-    upper_band_array = results.get('upper_band', np.array([]))
-    lower_band_array = results.get('lower_band', np.array([]))
+    upper_band_array = results.get('upper_band', np.array([])) # +1 Std Dev
+    lower_band_array = results.get('lower_band', np.array([])) # -1 Std Dev
+    upper_band_2std_array = results.get('upper_band_2std', np.array([])) # New: +2 Std Dev
+    lower_band_2std_array = results.get('lower_band_2std', np.array([])) # New: -2 Std Dev
     final_prices_list = results.get('final_prices', []) # List of finite actual final prices
 
     # Safely get final values from aggregate arrays
     median_end_price = median_prices_array[-1] if len(median_prices_array) > 0 and np.isfinite(median_prices_array[-1]) else np.nan
     mean_end_price = mean_prices_array[-1] if len(mean_prices_array) > 0 and np.isfinite(mean_prices_array[-1]) else np.nan
     std_dev_end = std_dev_prices_array[-1] if len(std_dev_prices_array) > 0 and np.isfinite(std_dev_prices_array[-1]) else np.nan
-    upper_band_end_price = upper_band_array[-1] if len(upper_band_array) > 0 and np.isfinite(upper_band_array[-1]) else np.nan
-    lower_band_end_price = lower_band_array[-1] if len(lower_band_array) > 0 and np.isfinite(lower_band_array[-1]) else np.nan
+    upper_band_end_price_1std = upper_band_array[-1] if len(upper_band_array) > 0 and np.isfinite(upper_band_array[-1]) else np.nan
+    lower_band_end_price_1std = lower_band_array[-1] if len(lower_band_array) > 0 and np.isfinite(lower_band_array[-1]) else np.nan
+    upper_band_end_price_2std = upper_band_2std_array[-1] if len(upper_band_2std_array) > 0 and np.isfinite(upper_band_2std_array[-1]) else np.nan # New: +2 Std Dev end price
+    lower_band_end_price_2std = lower_band_2std_array[-1] if len(lower_band_2std_array) > 0 and np.isfinite(lower_band_2std_array[-1]) else np.nan # New: -2 Std Dev end price
+
 
     # Safely get min/max from the list of *actual* final prices
     actual_min_end_price = np.min(final_prices_list) if final_prices_list else np.nan
     actual_max_end_price = np.max(final_prices_list) if final_prices_list else np.nan
 
-
+    # Get delta percentages and risk/reward from stored values (calculated based on +/- 1 std dev)
     delta_upper_pct = results.get('delta_upper_pct', np.nan)
     delta_lower_pct = results.get('delta_lower_pct', np.nan)
     risk_reward_ratio_val = results.get('risk_reward_ratio', np.nan)
@@ -726,8 +812,10 @@ if st.session_state.simulation_results is not None:
             'Simulated Median Ending Price ($)',
             'Simulated Mean Ending Price ($)',
             'Simulated Std Dev Ending Price ($)',
-            'Simulated +1 Std Dev Ending Price ($)',
+            'Simulated +1 Std Dev Ending Price ($)', # +/- 1 Std Dev
             'Simulated -1 Std Dev Ending Price ($)',
+            'Simulated +2 Std Dev Ending Price ($)', # New: +/- 2 Std Dev
+            'Simulated -2 Std Dev Ending Price ($)',
             'Actual Min Simulated Ending Price ($)',
             'Actual Max Simulated Ending Price ($)',
             'Expected movement to +1 Std Dev End (%)', # Keep in table for summary
@@ -747,8 +835,10 @@ if st.session_state.simulation_results is not None:
             format_value(median_end_price, ".2f"),
             format_value(mean_end_price, ".2f"),
             format_value(std_dev_end, ".2f"),
-            format_value(upper_band_end_price, ".2f"),
-            format_value(lower_band_end_price, ".2f"),
+            format_value(upper_band_end_price_1std, ".2f"), # Use _1std variable
+            format_value(lower_band_end_price_1std, ".2f"), # Use _1std variable
+            format_value(upper_band_end_price_2std, ".2f"), # New: Use _2std variable
+            format_value(lower_band_end_price_2std, ".2f"), # New: Use _2std variable
             format_value(actual_min_end_price, ".2f"),
             format_value(actual_max_end_price, ".2f"),
             format_percentage(delta_upper_pct, ".2f"), # Use helper
