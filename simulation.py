@@ -418,53 +418,20 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
 # These functions read from session state and display results
 # They now use the moved helper functions
 
-def display_sidebar_results(simulation_results, placeholder):
-     # Clear previous sidebar results
-     placeholder.empty()
-     with placeholder.container():
-         st.subheader("Key Forecasts")
-         if simulation_results is not None:
-              # Use .get() with default values in case keys are missing due to errors
-              delta_upper_pct = simulation_results.get('delta_upper_pct', np.nan)
-              delta_lower_pct = simulation_results.get('delta_lower_pct', np.nan)
-              risk_reward_ratio = simulation_results.get('risk_reward_ratio', np.nan)
-              num_simulations_ran = simulation_results.get('num_simulations_ran', 'N/A')
-
-              # Use format_percentage helper function for display (NOW DEFINED ABOVE)
-              st.write(f"Expected movement to +1 Std Dev End: **{format_percentage(delta_upper_pct, '.2f', 'N/A')}**")
-              st.write(f"Expected movement to -1 Std Dev End: **{format_percentage(delta_lower_pct, '.2f', 'N/A')}**")
-
-
-              st.subheader("Risk/Reward")
-              # Format risk/reward ratio
-              risk_reward_str = "N/A"
-              if np.isfinite(risk_reward_ratio):
-                   if risk_reward_ratio == np.inf:
-                        risk_reward_str = "Infinite"
-                   else:
-                        risk_reward_str = f"{risk_reward_ratio:.2f} : 1"
-              elif np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
-                    # If ratio is NaN but deltas are finite, it implies delta_lower_pct was >= 0
-                   risk_reward_str = "Undetermined / Favorable Downside" # e.g. +5% gain, -0.1% loss
-
-              st.write(f"Ratio (+1 Gain : -1 Loss): **{risk_reward_str}**")
-
-              st.write(f"*(Based on {num_simulations_ran} runs)*")
-         else:
-              # Display initial message if no simulation run yet
-              st.info("Click 'Run Simulation' to see forecasts.")
+# Removed display_sidebar_results as the main section now handles this
 
 
 # --- Main Execution Flow (runs on every rerun) ---
 
 # The code up to here (Inputs, Fetch, Analysis Calculation, Slider Definition) runs on every rerun.
 
+
 # --- Button to Run Simulation ---
 # This block runs ONLY when the button is clicked
 if st.button("Run Simulation"):
     # Clear previous sidebar results visual (placeholder) - No sidebar placeholder needed anymore
     # Clear previous simulation results from session state
-    st.session_session_results = None # Clear old results
+    st.session_state.simulation_results = None # <-- Corrected typo here
 
     # --- Calculate Simulation Aggregates (Heavy Computation) ---
     # This happens once per button click
@@ -474,7 +441,7 @@ if st.button("Run Simulation"):
         # Ensure historical_data_close_analyzed is not empty before trying to get the last price
         if historical_data_close_analyzed.empty:
             st.error("Cannot run simulation: Historical data for analysis is empty.")
-            st.session_session_results = None
+            st.session_state.simulation_results = None # <-- Corrected typo here
             st.stop()
 
         try:
@@ -487,7 +454,7 @@ if st.button("Run Simulation"):
         if not np.isfinite(start_price) or start_price <= 0:
              st.error(f"Last historical price ({start_price}) is not a finite positive number. Cannot start simulation.")
              # Set session state to None to indicate simulation failed/skipped
-             st.session_session_results = None
+             st.session_state.simulation_results = None # <-- Corrected typo here
              st.stop()
 
         # Ensure the pre-calculated mean and volatility are finite and volatility is positive
@@ -497,7 +464,7 @@ if st.button("Run Simulation"):
 
         if not np.isfinite(loc_sim) or not np.isfinite(scale_sim) or scale_sim <= 0:
              st.error(f"Calculated historical mean ({loc_sim:.6f}) or EWMA volatility ({scale_sim:.6f}) is not finite or volatility is not positive. Cannot run simulation.")
-             st.session_session_results = None
+             st.session_state.simulation_results = None # <-- Corrected typo here
              st.stop()
 
 
@@ -518,7 +485,7 @@ if st.button("Run Simulation"):
             sim_path_length = len(simulated_dates_pd) + 1 # Add 1 for the starting price point
         except Exception as date_range_error:
              st.error(f"Error generating future dates for simulation: {date_range_error}. Cannot run simulation.")
-             st.session_session_results = None
+             st.session_state.simulation_results = None # <-- Corrected typo here
              st.stop()
 
         # Prepare the full date axis for plotting (Historical End + Simulated Dates)
@@ -531,11 +498,11 @@ if st.button("Run Simulation"):
             # Check length consistency
             if len(plot_sim_dates_pd) != sim_path_length:
                  st.error(f"Mismatch between calculated path length ({sim_path_length}) and generated plot dates length ({len(plot_sim_dates_pd)}). Cannot plot.")
-                 st.session_session_results = None
+                 st.session_state.simulation_results = None # <-- Corrected typo here
                  st.stop()
         else:
              st.error("Skipping simulation as future dates could not be generated or have zero length.")
-             st.session_session_results = None
+             st.session_state.simulation_results = None # <-- Corrected typo here
              st.stop()
 
 
@@ -589,7 +556,7 @@ if st.button("Run Simulation"):
         final_prices = [price for price in final_prices_list_raw if np.isfinite(price)]
 
 
-        # --- Calculate Sidebar Results Here (but store for main area display) ---
+        # --- Calculate Forecast Metrics (based on +/- 1 std dev) ---
         delta_upper_pct = np.nan
         delta_lower_pct = np.nan
         risk_reward_ratio = np.nan
@@ -626,7 +593,7 @@ if st.button("Run Simulation"):
     # --- Store Results in Session State ---
     # This makes the results available for the plotting and display functions on the next rerun
     # Store all necessary variables, including the original data used for analysis summary
-    st.session_session_results = {
+    st.session_state.simulation_results = { # <-- Corrected typo here
         'historical_data_close_analyzed': historical_data_close_analyzed, # Store this too for the final table
         'mean_float': mean_float, # Store historical stats
         'volatility_float': volatility_float, # Store historical stats (EWMA)
@@ -658,8 +625,8 @@ if st.button("Run Simulation"):
 # --- Display Risk/Reward and Key Forecasts (outside button block) ---
 # This runs on every rerun if simulation results are in session state
 # Moved from sidebar
-if st.session_state.simulation_results is not None:
-    results = st.session_session_results # Use session_session_results here
+if st.session_state.simulation_results is not None: # <-- Corrected typo here
+    results = st.session_state.simulation_results # <-- Corrected typo here
 
     # Use .get() with default values in case keys are missing due to errors
     delta_upper_pct = results.get('delta_upper_pct', np.nan)
@@ -701,7 +668,7 @@ if full_historical_data is not None and not full_historical_data.empty:
     fig = plot_simulation(
         full_historical_data,
         historical_days_to_display,
-        st.session_session_results, # Pass session_session_results
+        st.session_state.simulation_results, # <-- Corrected typo here
         ticker, # Pass ticker
         historical_data_close_analyzed, # Pass analyzed data for count in title
         ewma_lambda # Pass lambda for title
@@ -719,10 +686,10 @@ else:
 
 # --- Display Results Table (outside button block, at the bottom) ---
 # This runs on every rerun. It displays the table IF simulation results are in session state.
-if st.session_session_results is not None: # Use session_session_results here
+if st.session_state.simulation_results is not None: # <-- Corrected typo here
     st.subheader("Simulation and Analysis Summary")
 
-    results = st.session_session_results # Use session_session_results here
+    results = st.session_state.simulation_results # <-- Corrected typo here
 
     # Get historical stats from stored results
     historical_data_analyzed = results.get('historical_data_close_analyzed')
