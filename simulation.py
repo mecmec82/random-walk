@@ -13,6 +13,38 @@ st.set_page_config(page_title="Market Random Walk Simulation (yfinance)", layout
 st.title("Market Price Random Walk Simulation")
 st.write("Simulate multiple future price movements using random walks based on historical volatility, using free data via yfinance.")
 
+# --- Explainer Section (Collapsible) ---
+with st.expander("📊 How this simulation works"):
+    st.write("""
+    This app simulates future stock/crypto prices using a **random walk model**, specifically a Geometric Brownian Motion (GBM).
+    It's a common model in finance, but it's important to understand its assumptions and limitations.
+
+    **Here's the breakdown:**
+
+    1.  **Data Fetching:** It fetches historical adjusted closing prices for the specified ticker (e.g., SPY, BTC-USD) using the `yfinance` library.
+    2.  **Analysis Period:** You select a number of historical trading days (`Historical Trading Days for Analysis`). The app uses the closing prices from *this specific period* to calculate:
+        *   The average daily log return (drift).
+        *   The **daily volatility** using an **Exponentially Weighted Moving Average (EWMA)** method. EWMA gives more importance to recent price movements based on the `EWMA Decay Factor (Lambda)`. A lambda closer to 1 means recent data are weighted much higher. This volatility is crucial as it determines the *size* of the random steps in the simulation.
+    3.  **Random Walk Simulation:** For each simulation step into the future (`Future Simulation Days`), the model calculates the next price based on the previous day's price multiplied by a random factor. This random factor is determined by:
+        *   The historical average daily return (the drift).
+        *   A random value drawn from a **normal (Gaussian) distribution**.
+        *   The size of this random value is scaled by the calculated EWMA daily volatility.
+    4.  **Monte Carlo Approach:** The simulation is repeated many times (`Number of Simulations to Run`). Each simulation run generates a different possible price path because of the random component.
+    5.  **Aggregation and Results:**
+        *   Instead of showing hundreds of individual paths (which would be messy), the app calculates the **median** price across all simulations at each future time step. This gives a sense of the most 'typical' outcome.
+        *   It also calculates a **standard deviation band** around the mean price at each step. This band indicates the typical spread of outcomes. Roughly 68% of simulated paths are expected to stay within the +/- 1 Standard Deviation band *if the underlying assumptions held perfectly*.
+        *   Key metrics like the expected price movement to the edge of the band and a Risk/Reward ratio are calculated based on the simulation's final step aggregates.
+    6.  **Plotting and Summary:** The historical data (you can adjust how many historical days are *displayed* on the plot using a separate slider, without changing the analysis period) is plotted alongside the simulated median path and the standard deviation band. A table provides a summary of the historical analysis parameters and the key simulation results.
+
+    **Important Considerations:**
+
+    *   **This is a simplified model:** It assumes future price movements are *random* and follow a normal distribution with constant drift and *predictable* volatility (based on EWMA).
+    *   **It does NOT predict the future:** It shows a *range of possible outcomes* based on historical patterns and random chance. Real markets are influenced by news, events, changing fundamentals, and human behavior that are not captured by this simple random walk.
+    *   **Volatility is not constant:** While EWMA is better than a simple average, volatility still changes in ways not fully captured (e.g., GARCH models attempt this).
+    *   **Returns may not be normally distributed:** Extreme events happen more often than the normal distribution predicts ("fat tails").
+    *   Use these results for exploring potential scenarios and risk, not as definitive predictions.
+    """)
+
 # --- Initialize Session State for Simulation Results ---
 # This ensures simulation results persist across reruns caused by slider changes
 if 'simulation_results' not in st.session_state:
@@ -162,7 +194,9 @@ with st.spinner("Calculating historical statistics (including EWMA volatility)..
     try:
         # Calculate EWMA of squared returns (variance)
         # Use min_periods=0 to handle cases with very few returns gracefully (though >=2 are needed)
-        ewma_variance_series = log_returns.pow(2).ewm(alpha=ewma_alpha, adjust=False, min_periods=0).mean()
+        # Ensure log_returns is treated as numeric if there's any ambiguity
+        ewma_variance_series = log_returns.astype(float).pow(2).ewm(alpha=ewma_alpha, adjust=False, min_periods=0).mean()
+
 
         # The EWMA volatility for the *next* step is the square root of the *last* EWMA variance
         # Use .iloc[-1] and .item() to explicitly get the scalar value and avoid FutureWarning
@@ -179,7 +213,7 @@ with st.spinner("Calculating historical statistics (including EWMA volatility)..
     # Type and finiteness checks for calculated values
     # Use .item() for the mean to address FutureWarning
     try:
-        # Check if mean_daily_log_return is a pandas Series (it should be a float/scalar from .mean())
+        # Check if mean_daily_log_return is a pandas Series (it should be a float/numpy scalar from .mean())
         # If it's a Series of length 1 (unexpected), use .item()
         if isinstance(mean_daily_log_return, pd.Series):
              st.warning("Mean daily log return is a Series, extracting item.")
@@ -219,12 +253,8 @@ historical_days_to_display = st.sidebar.slider(
 )
 
 
-# --- Sidebar Results Display Area ---
-st.sidebar.header("Simulation Insights")
-sidebar_placeholder = st.sidebar.empty() # Create a placeholder to update results
-
-
 # --- Helper functions for formatting values safely ---
+# Moved outside any conditional blocks to be available on all reruns
 def format_value(value, format_str=".2f", default="N/A"):
     """Formats a numerical value, returning default if non-finite."""
     if np.isfinite(value):
@@ -241,7 +271,7 @@ def format_percentage(value, format_str=".2f", default="N/A"):
 # --- Define the plotting function ---
 # This function will be called *outside* the button block to redraw the plot
 # It takes the full historical data, the slider value, and the simulation results from session state
-def plot_simulation(full_historical_data, historical_days_to_display, simulation_results):
+def plot_simulation(full_historical_data, historical_days_to_display, simulation_results, ticker, historical_data_close_analyzed, ewma_lambda):
     fig, ax = plt.subplots(figsize=(14, 7))
 
     # --- Select data for plotting using the slider value and convert to numpy arrays ---
@@ -356,47 +386,6 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
     return fig
 
 
-# --- Define functions to display results ---
-# These functions read from session state and display results
-# They now use the moved helper functions
-
-def display_sidebar_results(simulation_results, placeholder):
-     # Clear previous sidebar results
-     placeholder.empty()
-     with placeholder.container():
-         st.subheader("Key Forecasts")
-         if simulation_results is not None:
-              # Use .get() with default values in case keys are missing due to errors
-              delta_upper_pct = simulation_results.get('delta_upper_pct', np.nan)
-              delta_lower_pct = simulation_results.get('delta_lower_pct', np.nan)
-              risk_reward_ratio = simulation_results.get('risk_reward_ratio', np.nan)
-              num_simulations_ran = simulation_results.get('num_simulations_ran', 'N/A')
-
-              # Use format_percentage helper function for display (NOW DEFINED ABOVE)
-              st.write(f"Expected movement to +1 Std Dev End: **{format_percentage(delta_upper_pct, '.2f', 'N/A')}**")
-              st.write(f"Expected movement to -1 Std Dev End: **{format_percentage(delta_lower_pct, '.2f', 'N/A')}**")
-
-
-              st.subheader("Risk/Reward")
-              # Format risk/reward ratio
-              risk_reward_str = "N/A"
-              if np.isfinite(risk_reward_ratio):
-                   if risk_reward_ratio == np.inf:
-                        risk_reward_str = "Infinite"
-                   else:
-                        risk_reward_str = f"{risk_reward_ratio:.2f} : 1"
-              elif np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
-                    # If ratio is NaN but deltas are finite, it implies delta_lower_pct was >= 0
-                   risk_reward_str = "Undetermined / Favorable Downside" # e.g. +5% gain, -0.1% loss
-
-              st.write(f"Ratio (+1 Gain : -1 Loss): **{risk_reward_str}**")
-
-              st.write(f"*(Based on {num_simulations_ran} runs)*")
-         else:
-              # Display initial message if no simulation run yet
-              st.info("Click 'Run Simulation' to see forecasts.")
-
-
 # --- Main Execution Flow (runs on every rerun) ---
 
 # The code up to here (Inputs, Fetch, Analysis Calculation, Slider Definition, Historical Analysis Results Display) runs on every rerun.
@@ -404,8 +393,7 @@ def display_sidebar_results(simulation_results, placeholder):
 # --- Button to Run Simulation ---
 # This block runs ONLY when the button is clicked
 if st.button("Run Simulation"):
-    # Clear previous sidebar results visual (placeholder)
-    sidebar_placeholder.empty()
+    # Clear previous sidebar results visual (placeholder) - No sidebar placeholder needed anymore
     # Clear previous simulation results from session state
     st.session_state.simulation_results = None # Clear old results
 
@@ -529,7 +517,7 @@ if st.button("Run Simulation"):
         final_prices = [price for price in final_prices_list_raw if np.isfinite(price)]
 
 
-        # --- Calculate Sidebar Results Here ---
+        # --- Calculate Sidebar Results Here (but store for main area display) ---
         delta_upper_pct = np.nan
         delta_lower_pct = np.nan
         risk_reward_ratio = np.nan
@@ -555,9 +543,9 @@ if st.button("Run Simulation"):
              potential_reward = delta_upper_pct
              potential_risk_abs = -delta_lower_pct # Absolute magnitude of downside movement
 
-             if potential_risk_abs > 1e-9: # Check if potential risk is meaningfully positive
+             if potential_risk_abs > 1e-9: # Check if potential risk is meaningfully positive (more than ~0)
                   risk_reward_ratio = potential_reward / potential_risk_abs
-             elif potential_risk_abs >= -1e-9 and potential_reward > 0: # Risk is zero or negative (upside), Reward is positive
+             elif potential_risk_abs >= -1e-9 and potential_reward > 1e-9: # Risk is zero or negative (upside), Reward is positive
                   risk_reward_ratio = np.inf
              # If risk is zero/negative and reward is zero/negative, ratio is undefined/N/A
 
@@ -589,15 +577,54 @@ if st.button("Run Simulation"):
 
 # --- Main Execution Flow (runs on every rerun) ---
 
-# The code up to here (Inputs, Fetch, Analysis Calculation, Slider Definition, Historical Analysis Results Display) runs on every rerun.
+# The code up to here (Inputs, Fetch, Analysis Calculation, Slider Definition) runs on every rerun.
+
+# --- Display Risk/Reward and Key Forecasts (outside button block) ---
+# This runs on every rerun if simulation results are in session state
+if st.session_state.simulation_results is not None:
+    results = st.session_state.simulation_results
+    delta_upper_pct = results.get('delta_upper_pct', np.nan)
+    delta_lower_pct = results.get('delta_lower_pct', np.nan)
+    risk_reward_ratio = results.get('risk_reward_ratio', np.nan)
+    num_simulations_ran = results.get('num_simulations_ran', 'N/A')
+
+
+    st.subheader("Simulation Forecast Insights")
+    st.write(f"*(Based on {num_simulations_ran} runs)*")
+    col1, col2, col3 = st.columns(3) # Use columns for better layout
+
+    with col1:
+        st.metric(label="Expected movement to +1 Std Dev End", value=format_percentage(delta_upper_pct, '.2f', 'N/A'))
+    with col2:
+        st.metric(label="Expected movement to -1 Std Dev End", value=format_percentage(delta_lower_pct, '.2f', 'N/A'))
+    with col3:
+        risk_reward_str = "N/A"
+        if np.isfinite(risk_reward_ratio):
+             if risk_reward_ratio == np.inf:
+                  risk_reward_str = "Infinite"
+             else:
+                  risk_reward_str = f"{risk_reward_ratio:.2f} : 1"
+        elif np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
+              # If ratio is NaN but deltas are finite, it implies delta_lower_pct was >= 0
+              risk_reward_str = "Undetermined / Favorable Downside" # e.g. +5% gain, -0.1% loss
+
+        st.metric(label="Risk/Reward Ratio (+1 Gain : -1 Loss)", value=risk_reward_str)
+
 
 # --- Display Plot (outside button block) ---
 # This runs on every rerun (button click or slider move)
 # It gets data from full_historical_data (cached) and reads simulation results from session state.
 st.subheader("Price Chart: Historical Data, Median, and Standard Deviation Band")
 if full_historical_data is not None and not full_historical_data.empty:
-    # Pass the full fetched data and simulation results from session state to the plotting function
-    fig = plot_simulation(full_historical_data, historical_days_to_display, st.session_state.simulation_results)
+    # Pass required analysis parameters to the plotting function for title
+    fig = plot_simulation(
+        full_historical_data,
+        historical_days_to_display,
+        st.session_state.simulation_results,
+        ticker, # Pass ticker
+        historical_data_close_analyzed, # Pass analyzed data for count in title
+        ewma_lambda # Pass lambda for title
+    )
     st.pyplot(fig)
     plt.close(fig) # Always close the figure
 else:
@@ -607,12 +634,6 @@ else:
     else:
          # This case should ideally be caught by the initial check/st.stop(), but defensive
          st.warning("Waiting for historical data...")
-
-
-# --- Display Sidebar Results (outside button block) ---
-# This runs on every rerun. It displays results IF they are in session state.
-# This call now happens AFTER format_value and format_percentage are defined.
-display_sidebar_results(st.session_state.simulation_results, sidebar_placeholder)
 
 
 # --- Display Results Table (outside button block, at the bottom) ---
@@ -709,9 +730,9 @@ if st.session_state.simulation_results is not None:
             'Simulated -1 Std Dev Ending Price ($)',
             'Actual Min Simulated Ending Price ($)',
             'Actual Max Simulated Ending Price ($)',
-            'Expected movement to +1 Std Dev End (%)',
-            'Expected movement to -1 Std Dev End (%)',
-            'Risk/Reward Ratio (+1 Gain : -1 Loss)',
+            'Expected movement to +1 Std Dev End (%)', # Keep in table for summary
+            'Expected movement to -1 Std Dev End (%)', # Keep in table for summary
+            'Risk/Reward Ratio (+1 Gain : -1 Loss)', # Keep in table for summary
         ],
         'Value': [
             hist_analysis_days,
@@ -730,8 +751,8 @@ if st.session_state.simulation_results is not None:
             format_value(lower_band_end_price, ".2f"),
             format_value(actual_min_end_price, ".2f"),
             format_value(actual_max_end_price, ".2f"),
-            format_percentage(delta_upper_pct, ".2f"),
-            format_percentage(delta_lower_pct, ".2f"),
+            format_percentage(delta_upper_pct, ".2f"), # Use helper
+            format_percentage(delta_lower_pct, ".2f"), # Use helper
             f"{format_value(risk_reward_ratio_val, '.2f')} : 1" if np.isfinite(risk_reward_ratio_val) and risk_reward_ratio_val != np.inf else ("Infinite" if risk_reward_ratio_val == np.inf else "N/A"),
         ]
     }
