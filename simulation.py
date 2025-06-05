@@ -580,7 +580,7 @@ if st.button("Run Simulation"):
 
         # Percentage Delta to -1 Std Dev
         if np.isfinite(final_lower_price_1std) and last_historical_price_scalar > 0:
-             delta_lower_pct = ((final_lower_price_2std - last_historical_price_scalar) / last_historical_price_scalar) * 100
+             delta_lower_pct_2std = ((final_lower_price_2std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
         # Risk/Reward Ratio (Handle division by zero or negative risk)
         if np.isfinite(delta_upper_pct_2std) and np.isfinite(delta_lower_pct):
@@ -612,8 +612,8 @@ if st.button("Run Simulation"):
         'lower_band_2std': lower_band_2std, # New: Store -2 std dev band
         'final_prices': final_prices, # List of finite actual final prices
         'simulated_dates': simulated_dates_pd, # Dates for the simulation period (without start)
-        'delta_upper_pct': delta_upper_pct, # Store sidebar values (+1 std dev based)
-        'delta_lower_pct': delta_lower_pct, # Store sidebar values (-1 std dev based)
+        'delta_upper_pct': delta_upper_pct_2std, # Store sidebar values (+1 std dev based)
+        'delta_lower_pct': delta_lower_pct_2std, # Store sidebar values (-1 std dev based)
         'risk_reward_ratio': risk_reward_ratio, # Store sidebar values (+1/-1 std dev based)
         'num_simulations_ran': num_simulations, # Store number of sims run for display
     }
