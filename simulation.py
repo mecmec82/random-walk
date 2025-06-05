@@ -584,8 +584,8 @@ if st.button("Run Simulation"):
 
         # Risk/Reward Ratio (Handle division by zero or negative risk)
         if np.isfinite(delta_upper_pct_2std) and np.isfinite(delta_lower_pct):
-             potential_reward = delta_upper_pct_2st
-             potential_risk_abs = -delta_lower_pct_2st # Absolute magnitude of downside movement
+             potential_reward = delta_upper_pct_2std
+             potential_risk_abs = -delta_lower_pct_2std # Absolute magnitude of downside movement
 
              if potential_risk_abs > 1e-9: # Check if potential risk is meaningfully positive (more than ~0)
                   risk_reward_ratio = potential_reward / potential_risk_abs
