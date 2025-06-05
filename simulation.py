@@ -583,7 +583,7 @@ if st.button("Run Simulation"):
              delta_lower_pct = ((final_lower_price_2std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
         # Risk/Reward Ratio (Handle division by zero or negative risk)
-        if np.isfinite(delta_upper_pct_2st) and np.isfinite(delta_lower_pct):
+        if np.isfinite(delta_upper_pct_2std) and np.isfinite(delta_lower_pct):
              potential_reward = delta_upper_pct_2st
              potential_risk_abs = -delta_lower_pct_2st # Absolute magnitude of downside movement
 
