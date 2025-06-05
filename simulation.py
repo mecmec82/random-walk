@@ -559,6 +559,8 @@ if st.button("Run Simulation"):
         # --- Calculate Forecast Metrics (based on +/- 1 std dev) ---
         delta_upper_pct = np.nan
         delta_lower_pct = np.nan
+        delta_upper_pct_2std = np.nan
+        delta_lower_pct_2std = np.nan
         risk_reward_ratio = np.nan
 
         # Ensure last historical price is available and finite (already checked start_price)
@@ -567,21 +569,23 @@ if st.button("Run Simulation"):
 
         # Ensure final aggregate band values are finite for percentage calculation
         # Risk/Reward and +/- 1 Std Dev movement are based on +/- 1 band endpoints
-        final_upper_price_1std = upper_band[-1] if len(upper_band) > 0 and np.isfinite(upper_band[-1]) else np.nan
-        final_lower_price_1std = lower_band[-1] if len(lower_band) > 0 and np.isfinite(lower_band[-1]) else np.nan
+        final_upper_price_1std = upper_band[-1] if len(upper_band_2std) > 0 and np.isfinite(upper_band_2std[-1]) else np.nan
+        final_lower_price_1std = lower_band[-1] if len(lower_band_2std) > 0 and np.isfinite(lower_band_2std[-1]) else np.nan
+        final_upper_price_2std = upper_band[-1] if len(upper_band_2std) > 0 and np.isfinite(upper_band_2std[-1]) else np.nan
+        final_lower_price_2std = lower_band[-1] if len(lower_band_2std) > 0 and np.isfinite(lower_ban_2stdd[-1]) else np.nan
 
         # Percentage Delta to +1 Std Dev
         if np.isfinite(final_upper_price_1std) and last_historical_price_scalar > 0:
-             delta_upper_pct = ((final_upper_price_1std - last_historical_price_scalar) / last_historical_price_scalar) * 100
+             delta_upper_pct_2std = ((final_upper_price_2std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
         # Percentage Delta to -1 Std Dev
         if np.isfinite(final_lower_price_1std) and last_historical_price_scalar > 0:
-             delta_lower_pct = ((final_lower_price_1std - last_historical_price_scalar) / last_historical_price_scalar) * 100
+             delta_lower_pct = ((final_lower_price_2std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
         # Risk/Reward Ratio (Handle division by zero or negative risk)
-        if np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
-             potential_reward = delta_upper_pct
-             potential_risk_abs = -delta_lower_pct # Absolute magnitude of downside movement
+        if np.isfinite(delta_upper_pct_2st) and np.isfinite(delta_lower_pct):
+             potential_reward = delta_upper_pct_2st
+             potential_risk_abs = -delta_lower_pct_2st # Absolute magnitude of downside movement
 
              if potential_risk_abs > 1e-9: # Check if potential risk is meaningfully positive (more than ~0)
                   risk_reward_ratio = potential_reward / potential_risk_abs
