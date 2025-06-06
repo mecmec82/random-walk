@@ -219,7 +219,7 @@ def calculate_historical_stats(historical_data_window, analysis_days, sma_period
     last_date_analyzed = historical_data_close_analyzed.index.max() # Last date of the analysis period
 
     sma_bias_applied = False
-    sma_calc_message = ""
+    sma_calc_message = "" # Default empty message
 
     if not sma_series.empty and last_date_analyzed in sma_series.index:
          try:
@@ -228,27 +228,35 @@ def calculate_historical_stats(historical_data_window, analysis_days, sma_period
               # Get the SMA value corresponding to the last date in the analysis period
               last_sma_value = sma_series.loc[last_date_analyzed].item()
 
+              # Include SMA info in the message even if bias_multiplier is 0
+              sma_calc_message = f"Last Price ({last_price_for_sma_comp:.2f}) vs {sma_period}-Day SMA ({last_sma_value:.2f}). "
+
+
               bias_amount = bias_multiplier * abs(original_mean_float) # Calculate bias amount
 
               if last_price_for_sma_comp > last_sma_value:
                   biased_mean_float = original_mean_float + bias_amount
-                  sma_calc_message = f"Last price ABOVE SMA ({last_price_for_sma_comp:.2f} > {last_sma_value:.2f}). UPWARD bias applied ({bias_amount:.6f})."
+                  sma_calc_message += f"Last price ABOVE SMA. UPWARD bias applied ({bias_amount:.6f})."
                   sma_bias_applied = True
               elif last_price_for_sma_comp < last_sma_value:
                   biased_mean_float = original_mean_float - bias_amount
-                  sma_calc_message = f"Last price BELOW SMA ({last_price_for_sma_comp:.2f} < {last_sma_value:.2f}). DOWNWARD bias applied (-{bias_amount:.6f})."
+                  sma_calc_message += f"Last price BELOW SMA. DOWNWARD bias applied (-{bias_amount:.6f})."
                   sma_bias_applied = True
-              else:
+              else: # last_price_for_sma_comp == last_sma_value
                   biased_mean_float = original_mean_float
-                  sma_calc_message = f"Last price EQUAL to SMA ({last_price_for_sma_comp:.2f} == {last_sma_value:.2f}). No bias applied."
+                  sma_calc_message += f"Last price EQUAL to SMA. No bias applied."
                   sma_bias_applied = True # Calculation was performed
 
          except Exception as e:
               sma_calc_message = f"Error during SMA comparison or bias calculation: {e}. Using original mean."
               biased_mean_float = original_mean_float # Ensure it's the original mean if bias fails
+              sma_bias_applied = False # Bias was not successfully applied
+
     else:
+        # This message is redundant if already caught by min_required_window check, but adds detail if window IS large enough but index lookup fails for some reason
         sma_calc_message = f"Not enough historical data ({len(historical_data_window)} days) for {sma_period}-day SMA calculation ending at {last_date_analyzed.strftime('%Y-%m-%d')}. Using original mean."
         biased_mean_float = original_mean_float # Ensure it's the original mean if bias fails
+        sma_bias_applied = False # Bias was not successfully applied
 
 
     # 5. Final Validation and Return
@@ -309,9 +317,14 @@ def run_monte_carlo_simulation(start_price, biased_mean, volatility, simulation_
     lower_band_2std = mean_prices - 2 * std_dev_prices # -2 Std Dev
 
     # Return aggregate paths and final endpoints
-    # Check if all aggregates are finite at the final step
-    if not np.isfinite([median_prices[-1], mean_prices[-1], std_dev_prices[-1], upper_band_1std[-1], lower_band_1std[-1], upper_band_2std[-1], lower_band_2std[-1]]).all():
-         return None, None, None, None, None, None, None, "Calculated aggregate paths contain non-finite values at the end."
+    # Check if all aggregates are finite at the final step (index simulation_days)
+    final_step_index = simulation_days # Corresponds to the end price in the simulation (length is simulation_days + 1)
+    if (len(median_prices) <= final_step_index or
+        not np.isfinite([median_prices[final_step_index], mean_prices[final_step_index], std_dev_prices[final_step_index],
+                         upper_band_1std[final_step_index], lower_band_1std[final_step_index],
+                         upper_band_2std[final_step_index], lower_band_2std[final_step_index]]).all()):
+         return None, None, None, None, None, None, None, f"Calculated aggregate paths contain non-finite values at the final step (index {final_step_index})."
+
 
     return median_prices, mean_prices, std_dev_prices, upper_band_1std, lower_band_1std, upper_band_2std, lower_band_2std, None # Return None for error message if successful
 
@@ -320,9 +333,11 @@ def run_monte_carlo_simulation(start_price, biased_mean, volatility, simulation_
 # This slider is defined *outside* the button block so it appears immediately.
 # Its max_value is based on the actual number of days successfully fetched and available for analysis.
 # historical_data_close_analyzed needs to be calculated before the slider runs.
-# We need historical_data_for_sma_and_analysis first.
+# We need historical_data_for_sma_and_analysis_initial first.
 # Then we take the tail of that for the analysis period.
-historical_data_close_analyzed_initial = full_historical_data.tail(historical_days_analysis) # Data for analysis period based on current sidebar input
+historical_data_for_sma_and_analysis_initial = full_historical_data.tail(historical_days_analysis + sma_period)
+historical_data_close_analyzed_initial = historical_data_for_sma_and_analysis_initial.tail(historical_days_analysis) # Data for analysis period based on current sidebar input
+
 
 max_display_days = len(historical_data_close_analyzed_initial) # Use the length of the *analysis period* data
 # Set default value: requested days, capped by available, min 100 unless less data is available
@@ -543,7 +558,8 @@ if st.button("Run Main Simulation"):
         # Get the start price (last price of the analysis period tail)
         # This is the last price in historical_data_for_sma_and_analysis_initial.tail(historical_days_analysis)
         try:
-            start_price_data = historical_data_for_sma_and_analysis_initial.tail(historical_days_analysis).iloc[-1]
+            historical_data_close_analyzed_latest = historical_data_for_sma_and_analysis_initial.tail(historical_days_analysis)
+            start_price_data = historical_data_close_analyzed_latest.iloc[-1]
             start_price = float(start_price_data.item()) if np.isfinite(start_price_data) else np.nan
         except Exception as e:
             st.error(f"Error getting start price from historical data: {e}")
@@ -567,7 +583,7 @@ if st.button("Run Main Simulation"):
 
         # 3. Prepare Dates for Plotting
         # The dates for plotting the simulation path start from the last date of the *analysis* period
-        historical_data_close_analyzed_latest = historical_data_for_sma_and_analysis_initial.tail(historical_days_analysis)
+        # historical_data_close_analyzed_latest is already calculated above
         last_historical_date_analysis = historical_data_close_analyzed_latest.index.max()
 
         simulated_dates_pd = pd.DatetimeIndex([])
@@ -697,14 +713,15 @@ if st.button("Run Backtest"):
         # Get the date that is `simulation_days` trading days before the last date
         latest_valid_start_date = all_dates_sorted[-1 - simulation_days] # Index -1 is last, -1-sim_days is sim_days before last
 
-        # Now, select dates from `all_dates_sorted` that are between `earliest_valid_start_date` and `latest_valid_start_date`
-        # and take the last `backtest_days_count` of these dates.
+        # Now, select dates from `all_dates_sorted` that are between or equal to `earliest_valid_start_date` and `latest_valid_start_date`
         potential_start_dates_in_range = all_dates_sorted[
             (all_dates_sorted >= earliest_valid_start_date) &
             (all_dates_sorted <= latest_valid_start_date)
         ]
 
-        valid_backtest_start_dates = potential_start_dates_in_range.tail(backtest_days_count).tolist()
+        # Use slicing [-N:] on the DatetimeIndex to get the last `backtest_days_count` dates
+        # and convert them to a list. This addresses the AttributeError.
+        valid_backtest_start_dates = potential_start_dates_in_range[-backtest_days_count:].tolist()
 
 
     if not valid_backtest_start_dates:
@@ -801,10 +818,11 @@ if st.button("Run Backtest"):
 
 
             # 5. Get the simulated band endpoints for the final step (simulation_days ahead)
-            if len(upper_band_1std) > simulation_days and len(lower_band_1std) > simulation_days:
-                 # The endpoints correspond to index `simulation_days` (since index 0 is start)
-                 simulated_upper_end = upper_band_1std[simulation_days] if np.isfinite(upper_band_1std[simulation_days]) else np.nan
-                 simulated_lower_end = lower_band_1std[simulation_days] if np.isfinite(lower_band_1std[simulation_days]) else np.nan
+            # The endpoint index is `simulation_days` in the aggregated arrays (since index 0 is the start price)
+            final_step_index = simulation_days
+            if len(upper_band_1std) > final_step_index and len(lower_band_1std) > final_step_index:
+                 simulated_upper_end = upper_band_1std[final_step_index] if np.isfinite(upper_band_1std[final_step_index]) else np.nan
+                 simulated_lower_end = lower_band_1std[final_step_index] if np.isfinite(lower_band_1std[final_step_index]) else np.nan
             else:
                  simulated_upper_end = np.nan
                  simulated_lower_end = np.nan
