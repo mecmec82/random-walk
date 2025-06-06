@@ -26,7 +26,7 @@ with st.expander("📊 How this simulation works"):
         *   The average daily log return (drift).
         *   The **daily volatility** using an **Exponentially Weighted Moving Average (EWMA)** method. EWMA gives more importance to recent price movements based on the `EWMA Decay Factor (Lambda)`. A lambda closer to 1 means recent data are weighted much higher. This volatility is crucial as it determines the *size* of the random steps in the simulation.
     3.  **Random Walk Simulation:** For each simulation step into the future (`Future Simulation Days`), the model calculates the next price based on the previous day's price multiplied by a random factor. This random factor is determined by:
-        *   The calculated mean drift (potentially biased).
+        *   The historical average daily return (the drift).
         *   A random value drawn from a **normal (Gaussian) distribution**.
         *   The size of this random value is scaled by the calculated EWMA daily volatility.
     4.  **Monte Carlo Approach:** The simulation is repeated many times (`Number of Simulations to Run`). Each simulation run generates a different possible price path because of the random component.
@@ -36,16 +36,9 @@ with st.expander("📊 How this simulation works"):
         *   Key metrics like the expected price movement to the edge of the +/- 1 Std Dev band and a Risk/Reward ratio based on the +/- 1 Std Dev endpoints are calculated from the simulation's final step aggregates.
     6.  **Plotting and Summary:** The historical data (you can adjust how many historical days are *displayed* on the plot using a separate slider, without changing the analysis period) is plotted alongside the simulated median path and the standard deviation bands. A table provides a summary of the historical analysis parameters and the key simulation results.
 
-    **New Mean Bias Feature (Optional):**
-
-    *   You can introduce a bias to the calculated historical mean daily return based on whether the last price is above or below a Simple Moving Average (SMA).
-    *   If the last price is above the SMA (over the `SMA Period for Bias`), the mean drift used in the simulation is slightly increased. If it's below the SMA, the mean drift is slightly decreased.
-    *   The magnitude of the bias is controlled by the `Bias Multiplier` multiplied by the absolute value of the original historical mean return. A multiplier of 0 means no bias is applied.
-    *   This is a simple form of incorporating a basic trend-following idea into the drift, but it's still a simplification and doesn't capture complex market dynamics.
-
     **Important Considerations:**
 
-    *   **This is a simplified model:** It assumes future price movements are *random* and follow a normal distribution with constant drift and *predictable* volatility (based on EWMA), plus a simple SMA-based directional bias on the mean.
+    *   **This is a simplified model:** It assumes future price movements are *random* and follow a normal distribution with constant drift and *predictable* volatility (based on EWMA).
     *   **It does NOT predict the future:** It shows a *range of possible outcomes* based on historical patterns and random chance. Real markets are influenced by news, events, changing fundamentals, and human behavior that are not captured by this simple random walk.
     *   **Volatility is not constant:** While EWMA is better than a simple average, volatility still changes in ways not fully captured (e.g., GARCH models attempt this).
     *   **Returns may not be normally distributed:** Extreme events happen more often than the normal distribution predicts ("fat tails").
@@ -79,12 +72,6 @@ ewma_lambda = st.sidebar.slider(
     help="Higher values give more weight to recent returns when calculating volatility."
 )
 
-# --- SMA Bias Settings ---
-st.sidebar.header("Mean Bias (SMA)")
-sma_period = st.sidebar.number_input("SMA Period for Bias", min_value=10, value=100, step=10, help="Period for the Simple Moving Average used to bias the mean drift.")
-bias_multiplier = st.sidebar.number_input("Bias Multiplier", min_value=0.0, value=0.5, step=0.05, format="%.2f", help="Multiplier for biasing the mean drift. If price is above SMA, mean increases by this factor * abs(mean). If below, decreases.")
-st.sidebar.markdown(f"*(Bias amount = `{bias_multiplier} * |Historical Mean|`)*")
-
 
 st.sidebar.write("Data fetched using yfinance (Yahoo Finance).")
 st.sidebar.write("Volatility estimated using Exponentially Weighted Moving Average (EWMA).")
@@ -105,12 +92,8 @@ def fetch_historical_data(ticker, num_days):
     # Determine start date: go back enough calendar days to cover num_days *trading* days
     # Using 2.5x as a generous estimate for stocks (approx 252 trading days/year)
     # to ensure we fetch enough history even for longer analysis periods.
-    # Add buffer for SMA calculation as well
     end_date = datetime.now()
-    # Need historical_days_requested + sma_period data for SMA calculation
-    # Total calendar days needed = (historical_days_requested + sma_period) * buffer
-    days_buffer = max(historical_days_requested, sma_period) # Ensure we fetch enough for the larger period
-    start_date = end_date - timedelta(days=int(days_buffer * 2.5))
+    start_date = end_date - timedelta(days=int(num_days * 2.5))
 
 
     try:
@@ -163,147 +146,97 @@ def fetch_historical_data(ticker, num_days):
 
 # --- Fetch Historical Data (Cached - runs on initial load and input changes) ---
 # This block runs on every rerun, but the fetch_historical_data function itself is cached.
-# It fetches enough data to satisfy the historical_days_requested plus the SMA period buffer.
+# It fetches enough data to satisfy the historical_days_requested plus a buffer.
 full_historical_data = fetch_historical_data(
     ticker=ticker,
-    # Fetch data for analysis period PLUS SMA period
-    num_days=historical_days_requested + sma_period # Increased fetch range
+    num_days=historical_days_requested # Fetch data for at least this many days + buffer
 )
 
 # Select the specific subset for ANALYSIS (the most recent historical_days_requested days)
 # This is the data used downstream for calculating mean/volatility and starting the simulation.
 # This calculation runs on every rerun, but uses the cached full_historical_data.
-# We need enough data *before* the analysis period starts to calculate the SMA at the start of the analysis period.
-# So we take the tail covering analysis period + SMA period.
-historical_data_for_sma_and_analysis = full_historical_data.tail(historical_days_requested + sma_period)
+historical_data_close_analyzed = full_historical_data.tail(historical_days_requested)
 
 
-# --- Check if we have enough data for analysis and SMA ---
+# --- Check if we have enough data for analysis ---
 # This check runs on initial load and input changes (before button click)
-if historical_data_for_sma_and_analysis.empty or len(historical_data_for_sma_and_analysis) < historical_days_requested + sma_period:
-     st.warning(f"Enter parameters and click 'Run Simulation'. Not enough historical data available for analysis ({len(historical_data_for_sma_and_analysis)} days). Need at least {historical_days_requested + sma_period} days for EWMA and {sma_period}-day SMA calculation.")
+if historical_data_close_analyzed.empty or len(historical_data_close_analyzed) < 2:
+     # Display initial state or error if not enough data
+     st.warning("Enter parameters and click 'Run Simulation'. Not enough historical data available for analysis (need at least 2 days with positive prices).")
+     # Stop here if data is insufficient, so we don't try to create a slider or calculate stats with invalid range
      st.stop()
 
 
-# --- Calculate Historical Returns and Volatility (using EWMA) and Mean (with SMA bias) ---
-# This calculation happens whenever inputs change.
-# It uses `historical_data_for_sma_and_analysis`
-with st.spinner("Calculating historical statistics (EWMA volatility & SMA bias)..."):
-
-    # The data needed for EWMA volatility is log returns *over the analysis period*.
-    # We apply the SMA bias based on the price/SMA at the *end* of the analysis period.
-
-    # First, isolate the data strictly for the analysis period (excluding the extra days needed for SMA calculation)
-    # This is the data `historical_days_requested` long.
-    historical_data_close_analyzed = historical_data_for_sma_and_analysis.tail(historical_days_requested)
-
+# --- Calculate Historical Returns and Volatility (using EWMA) ---
+# This calculation happens whenever inputs change, which includes the slider AND EWMA lambda.
+# It uses `historical_data_close_analyzed` which is NOT affected by the plot display slider.
+# It depends on the cached fetch result, so it's efficient unless ticker, historical_days_requested, or lambda change.
+with st.spinner("Calculating historical statistics (including EWMA volatility)..."):
+    # Ensure historical_data_close_analyzed is not empty before calculating returns
     if historical_data_close_analyzed.empty:
-        st.error("Historical data for analysis period is empty after selecting tail.")
+        st.error("Historical data for analysis is empty. Cannot calculate returns.")
         st.stop()
 
-    # Calculate log returns for the analysis period
     log_returns = np.log(historical_data_close_analyzed / historical_data_close_analyzed.shift(1)).dropna()
 
-    if len(log_returns) < 1: # Need at least one return (2 prices in analyzed period)
-        st.error(f"Not enough valid historical data ({len(historical_data_close_analyzed)} prices in analysis period) to calculate returns and volatility after dropping NaNs. Need at least 2 consecutive valid prices.")
+    if len(log_returns) < 1: # Need at least one return (2 prices)
+        st.error(f"Not enough valid historical data ({len(historical_data_close_analyzed)} prices) to calculate returns and volatility after dropping NaNs. Need at least 2 consecutive valid prices.")
         st.stop()
 
-    # Simple Mean Daily Log Return (This is the original mean before bias)
+    # Simple Mean Daily Log Return (Still useful as a drift estimate)
     mean_daily_log_return = log_returns.mean()
 
     # --- Calculate EWMA Daily Log Volatility ---
-    # Calculated on returns over the analysis period
+    # The EWM method uses alpha = 1 - lambda
     ewma_alpha = 1 - ewma_lambda
+    ewma_variance_series = None # Initialize in case of error
+
     try:
+        # Calculate EWMA of squared returns (variance)
+        # Use min_periods=0 to handle cases with very few returns gracefully (though >=2 are needed)
+        # Ensure log_returns is treated as numeric if there's any ambiguity
         ewma_variance_series = log_returns.astype(float).pow(2).ewm(alpha=ewma_alpha, adjust=False, min_periods=0).mean()
+
+
+        # The EWMA volatility for the *next* step is the square root of the *last* EWMA variance
+        # Use .iloc[-1] and .item() to explicitly get the scalar value and avoid FutureWarning
         ewma_daily_log_volatility_scalar = np.sqrt(ewma_variance_series.iloc[-1]).item()
+
+        # Assign to the variable used in simulation
         daily_log_volatility = float(ewma_daily_log_volatility_scalar)
+
+
     except Exception as e:
         st.error(f"Error calculating EWMA volatility: {e}")
         daily_log_volatility = np.nan # Indicate failure
 
-    # --- Calculate SMA and Apply Bias to Mean ---
-    original_mean_float = float(mean_daily_log_return.item()) # Store the original mean
-    biased_mean_float = original_mean_float   # Start with the original mean
-
-
-    # Calculate the SMA over the larger data window
-    sma_series = historical_data_for_sma_and_analysis.rolling(window=sma_period).mean().dropna()
-
-    # Ensure SMA series has a value corresponding to the end of the analysis period
-    # The index of sma_series aligns with the end date of the window.
-    # The last value of sma_series should correspond to the SMA ending on the last day of
-    # the `historical_data_for_sma_and_analysis` series.
-    # The price to compare is the last price in the `historical_data_close_analyzed` series.
-
-    if not sma_series.empty and sma_series.index.max() >= historical_data_close_analyzed.index.max():
-         try:
-              # Get the last price from the data used for ANALYSIS
-              last_price_for_sma_comp = historical_data_close_analyzed.iloc[-1].item()
-
-              # Get the SMA value corresponding to the last date in the analysis period
-              # Use .loc to align by date, .iloc[-1] on the result just in case of multiple entries for a date (unlikely with daily)
-              last_sma_value = sma_series.loc[historical_data_close_analyzed.index.max()].iloc[-1].item()
-
-
-              st.sidebar.write(f"Last Price vs {sma_period}-Day SMA:")
-              st.sidebar.write(f"  Last Price ({historical_data_close_analyzed.index.max().strftime('%Y-%m-%d')}): ${last_price_for_sma_comp:.2f}")
-              st.sidebar.write(f"  {sma_period}-Day SMA ({sma_series.index.max().strftime('%Y-%m-%d')}): ${last_sma_value:.2f}")
-
-
-              bias_amount = bias_multiplier * abs(original_mean_float) # Calculate bias amount
-
-              if last_price_for_sma_comp > last_sma_value:
-                  biased_mean_float = original_mean_float + bias_amount
-                  st.sidebar.info(f"Last price ABOVE SMA. Applying UPWARD bias ({bias_amount:.6f}) to mean drift.")
-              elif last_price_for_sma_comp < last_sma_value:
-                  biased_mean_float = original_mean_float - bias_amount
-                  st.sidebar.info(f"Last price BELOW SMA. Applying DOWNWARD bias (-{bias_amount:.6f}) to mean drift.")
-              else: # last_price_for_sma_comp == last_sma_value
-                  biased_mean_float = original_mean_float
-                  st.sidebar.info(f"Last price EQUAL to SMA. No bias applied to mean drift.")
-
-              st.sidebar.write(f"  Original Mean Drift: {original_mean_float:.6f}")
-              st.sidebar.write(f"  Biased Mean Drift: {biased_mean_float:.6f}")
-
-         except Exception as e:
-              st.error(f"Error calculating or applying SMA bias based on specific date: {e}")
-              st.sidebar.error("SMA bias calculation failed, using original mean.")
-              biased_mean_float = original_mean_float # Ensure it's the original mean if bias fails
-    else:
-        st.warning(f"Not enough historical data for {sma_period}-day SMA calculation to cover the analysis period end date. Need data going back at least {historical_days_requested + sma_period} days.")
-        st.sidebar.warning("SMA bias calculation skipped, using original mean.")
-        biased_mean_float = original_mean_float # Ensure it's the original mean if bias fails
-
-
-    # Now, use the potentially biased mean for the simulation
-    loc_sim = biased_mean_float
-    scale_sim = volatility_float # Volatility calculation remains the same
-
-    # --- Type and finiteness checks for calculated values ---
-    # Checks for mean_float and volatility_float are done on the values *used in the simulation*
+    # Type and finiteness checks for calculated values
+    # Use .item() for the mean to address FutureWarning
     try:
-        loc_sim_float_checked = float(loc_sim) # Ensure loc_sim is convertible to float
-        scale_sim_float_checked = float(scale_sim) # Ensure scale_sim is convertible to float
+        # Check if mean_daily_log_return is a pandas Series (it should be a float/numpy scalar from .mean())
+        # If it's a Series of length 1 (unexpected), use .item()
+        if isinstance(mean_daily_log_return, pd.Series):
+             #st.warning("Mean daily log return is a Series, extracting item.")
+             mean_float = float(mean_daily_log_return.item())
+        else: # Should be a standard float/numpy scalar
+            mean_float = float(mean_daily_log_return)
+
+        volatility_float = float(daily_log_volatility) # daily_log_volatility is already scalar float here
+
     except (TypeError, ValueError) as e:
-         st.error(f"Final calculated mean or volatility has unexpected type/value before simulation: {e}")
-         st.info(f"Mean value: {loc_sim}, Volatility value: {scale_sim}")
+         st.error(f"Unexpected value or type for calculated mean or volatility after EWMA: {e}")
+         st.info(f"Mean value: {mean_daily_log_return}, Mean type: {type(mean_daily_log_return)}")
+         st.info(f"Volatility value: {daily_log_volatility}, Volatility type: {type(daily_log_volatility)}")
          st.stop() # Stop before simulation if stats are bad
 
-    if not np.isfinite(loc_sim_float_checked) or not np.isfinite(scale_sim_float_checked) or scale_sim_float_checked <= 0:
-         st.error(f"Final calculated mean ({loc_sim_float_checked:.6f}) or volatility ({scale_sim_float_checked:.6f}) is not finite or volatility is not positive. Cannot run simulation.")
+    if not np.isfinite(mean_float) or not np.isfinite(volatility_float) or volatility_float <= 0:
+         st.error(f"Could not calculate finite, positive volatility ({volatility_float:.6f}) or finite mean ({mean_float:.6f}) from historical data. Check data or analysis period.")
          st.stop()
-
-    # Store the validated float values to be used in the simulation
-    mean_float_for_sim = loc_sim_float_checked
-    volatility_float_for_sim = scale_sim_float_checked
-
 
 # --- Add Slider for Displayed Historical Days ---
 # This slider is defined *outside* the button block so it appears immediately.
 # Its max_value is based on the actual number of days successfully fetched and available for analysis.
-# max_display_days should be based on the data used for analysis (historical_days_requested)
-max_display_days = len(historical_data_close_analyzed) # Use the length of the *analysis period* data
+max_display_days = len(historical_data_close_analyzed)
 # Set default value: requested days, capped by available, min 100 unless less data is available
 default_display_days = min(historical_days_requested, max_display_days)
 default_display_days = max(100, default_display_days) if max_display_days >= 100 else max_display_days
@@ -316,7 +249,7 @@ historical_days_to_display = st.sidebar.slider(
     max_value=max_display_days,
     value=default_display_days,
     step=10,
-    help="Slide to change the number of historical trading days shown on the chart. Does not affect analysis period or calculated volatility/bias."
+    help="Slide to change the number of historical trading days shown on the chart. Does not affect analysis period or calculated volatility."
 )
 
 
@@ -338,7 +271,7 @@ def format_percentage(value, format_str=".2f", default="N/A"):
 # --- Define the plotting function ---
 # This function will be called *outside* the button block to redraw the plot
 # It takes the full historical data, the slider value, and the simulation results from session state
-def plot_simulation(full_historical_data, historical_days_to_display, simulation_results, ticker, historical_data_close_analyzed_len, ewma_lambda, sma_period, bias_multiplier):
+def plot_simulation(full_historical_data, historical_days_to_display, simulation_results, ticker, historical_data_close_analyzed, ewma_lambda):
     fig, ax = plt.subplots(figsize=(14, 7))
 
     # --- Select data for plotting using the slider value and convert to numpy arrays ---
@@ -469,7 +402,7 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
 
 
     # Set plot title to reflect displayed historical range vs analysis range
-    plot_title = f'{ticker} Price: Historical Data ({len(historical_data_to_plot)}/{historical_data_close_analyzed_len} days analyzed) & Simulation (EWMA $\lambda$={ewma_lambda}, SMA Bias Period={sma_period}, Multiplier={bias_multiplier})' # Updated title
+    plot_title = f'{ticker} Price: Historical Data ({len(historical_data_to_plot)} days displayed, {len(historical_data_close_analyzed)} days analyzed) and Random Walk Simulation Aggregates (EWMA $\lambda$={ewma_lambda})'
     ax.set_title(plot_title)
     ax.set_xlabel('Date')
     ax.set_ylabel('Price ($)')
@@ -481,19 +414,11 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
     return fig
 
 
-# --- Helper functions for formatting values safely ---
-# Moved outside any conditional blocks to be available on all reruns
-def format_value(value, format_str=".2f", default="N/A"):
-    """Formats a numerical value, returning default if non-finite."""
-    if np.isfinite(value):
-        return format(value, format_str)
-    return default
+# --- Define functions to display results ---
+# These functions read from session state and display results
+# They now use the moved helper functions
 
-def format_percentage(value, format_str=".2f", default="N/A"):
-     """Formats a numerical value as a percentage, returning default if non-finite."""
-     if np.isfinite(value):
-          return f"{format(value, format_str)}%"
-     return default
+# Removed display_sidebar_results as the main section now handles this
 
 
 # --- Main Execution Flow (runs on every rerun) ---
@@ -504,19 +429,19 @@ def format_percentage(value, format_str=".2f", default="N/A"):
 # --- Button to Run Simulation ---
 # This block runs ONLY when the button is clicked
 if st.button("Run Simulation"):
+    # Clear previous sidebar results visual (placeholder) - No sidebar placeholder needed anymore
     # Clear previous simulation results from session state
-    st.session_state.simulation_results = None
+    st.session_state.simulation_results = None # <-- Corrected typo here
 
     # --- Calculate Simulation Aggregates (Heavy Computation) ---
     # This happens once per button click
-    with st.spinner(f"Running {num_simulations} simulations for {simulation_days} days with EWMA $\lambda$={ewma_lambda}, SMA Period={sma_period}, Bias Multiplier={bias_multiplier}..."):
+    with st.spinner(f"Running {num_simulations} simulations for {simulation_days} days using EWMA $\lambda$={ewma_lambda}..."):
 
         # Get start price from the data used for analysis
         # Ensure historical_data_close_analyzed is not empty before trying to get the last price
-        # The data needed is historical_data_close_analyzed (tail of full_historical_data)
         if historical_data_close_analyzed.empty:
             st.error("Cannot run simulation: Historical data for analysis is empty.")
-            st.session_state.simulation_results = None
+            st.session_state.simulation_results = None # <-- Corrected typo here
             st.stop()
 
         try:
@@ -529,14 +454,18 @@ if st.button("Run Simulation"):
         if not np.isfinite(start_price) or start_price <= 0:
              st.error(f"Last historical price ({start_price}) is not a finite positive number. Cannot start simulation.")
              # Set session state to None to indicate simulation failed/skipped
-             st.session_state.simulation_results = None
+             st.session_state.simulation_results = None # <-- Corrected typo here
              st.stop()
 
-        # The calculated `mean_float_for_sim` (biased mean) and `volatility_float_for_sim` (EWMA volatility)
-        # are available from the historical statistics calculation block above.
+        # Ensure the pre-calculated mean and volatility are finite and volatility is positive
+        # These checks are already done above, but reinforce before using them
+        loc_sim = mean_float
+        scale_sim = volatility_float
 
-        loc_sim = mean_float_for_sim # Use the calculated and checked biased mean
-        scale_sim = volatility_float_for_sim # Use the calculated and checked EWMA volatility
+        if not np.isfinite(loc_sim) or not np.isfinite(scale_sim) or scale_sim <= 0:
+             st.error(f"Calculated historical mean ({loc_sim:.6f}) or EWMA volatility ({scale_sim:.6f}) is not finite or volatility is not positive. Cannot run simulation.")
+             st.session_state.simulation_results = None # <-- Corrected typo here
+             st.stop()
 
 
         # Prepare dates for simulation results plotting (based on analysis dates)
@@ -556,7 +485,7 @@ if st.button("Run Simulation"):
             sim_path_length = len(simulated_dates_pd) + 1 # Add 1 for the starting price point
         except Exception as date_range_error:
              st.error(f"Error generating future dates for simulation: {date_range_error}. Cannot run simulation.")
-             st.session_state.simulation_results = None
+             st.session_state.simulation_results = None # <-- Corrected typo here
              st.stop()
 
         # Prepare the full date axis for plotting (Historical End + Simulated Dates)
@@ -569,19 +498,19 @@ if st.button("Run Simulation"):
             # Check length consistency
             if len(plot_sim_dates_pd) != sim_path_length:
                  st.error(f"Mismatch between calculated path length ({sim_path_length}) and generated plot dates length ({len(plot_sim_dates_pd)}). Cannot plot.")
-                 st.session_state.simulation_results = None
+                 st.session_state.simulation_results = None # <-- Corrected typo here
                  st.stop()
         else:
              st.error("Skipping simulation as future dates could not be generated or have zero length.")
-             st.session_state.simulation_results = None
+             st.session_state.simulation_results = None # <-- Corrected typo here
              st.stop()
 
 
         # --- Run Multiple Simulations (Inner loop) ---
-        # Use the calculated (potentially biased) mean (loc_sim) and EWMA volatility (scale_sim)
+        # Use the calculated EWMA volatility (scale_sim)
         # Generate all random log returns for all simulations at once for efficiency
         all_simulated_log_returns = np.random.normal(
-             loc=loc_sim,    # Biased Mean drift
+             loc=loc_sim,    # Mean drift
              scale=scale_sim, # EWMA Volatility
              size=(num_simulations, simulation_days) # Shape is (num_simulations, num_steps)
         )
@@ -630,6 +559,8 @@ if st.button("Run Simulation"):
         # --- Calculate Forecast Metrics (based on +/- 1 std dev) ---
         delta_upper_pct = np.nan
         delta_lower_pct = np.nan
+        delta_upper_pct_2std = np.nan
+        delta_lower_pct_2std = np.nan
         risk_reward_ratio = np.nan
 
         # Ensure last historical price is available and finite (already checked start_price)
@@ -638,21 +569,23 @@ if st.button("Run Simulation"):
 
         # Ensure final aggregate band values are finite for percentage calculation
         # Risk/Reward and +/- 1 Std Dev movement are based on +/- 1 band endpoints
-        final_upper_price_1std = upper_band[-1] if len(upper_band) > 0 and np.isfinite(upper_band[-1]) else np.nan
-        final_lower_price_1std = lower_band[-1] if len(lower_band) > 0 and np.isfinite(lower_band[-1]) else np.nan
+        final_upper_price_1std = upper_band[-1] if len(upper_band_2std) > 0 and np.isfinite(upper_band_2std[-1]) else np.nan
+        final_lower_price_1std = lower_band[-1] if len(lower_band_2std) > 0 and np.isfinite(lower_band_2std[-1]) else np.nan
+        final_upper_price_2std = upper_band[-1] if len(upper_band_2std) > 0 and np.isfinite(upper_band_2std[-1]) else np.nan
+        final_lower_price_2std = lower_band[-1] if len(lower_band_2std) > 0 and np.isfinite(lower_band_2std[-1]) else np.nan
 
-        # Percentage Delta to +1 Std Dev (using the +/- 1 band)
+        # Percentage Delta to +1 Std Dev
         if np.isfinite(final_upper_price_1std) and last_historical_price_scalar > 0:
-             delta_upper_pct = ((final_upper_price_1std - last_historical_price_scalar) / last_historical_price_scalar) * 100
+             delta_upper_pct_2std = ((final_upper_price_2std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
-        # Percentage Delta to -1 Std Dev (using the +/- 1 band)
+        # Percentage Delta to -1 Std Dev
         if np.isfinite(final_lower_price_1std) and last_historical_price_scalar > 0:
-             delta_lower_pct = ((final_lower_price_1std - last_historical_price_scalar) / last_historical_price_scalar) * 100
+             delta_lower_pct_2std = ((final_lower_price_2std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
         # Risk/Reward Ratio (Handle division by zero or negative risk)
-        if np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
-             potential_reward = delta_upper_pct
-             potential_risk_abs = -delta_lower_pct # Absolute magnitude of downside movement
+        if np.isfinite(delta_upper_pct_2std) and np.isfinite(delta_lower_pct_2std):
+             potential_reward = delta_upper_pct_2std
+             potential_risk_abs = -delta_lower_pct_2std # Absolute magnitude of downside movement
 
              if potential_risk_abs > 1e-9: # Check if potential risk is meaningfully positive (more than ~0)
                   risk_reward_ratio = potential_reward / potential_risk_abs
@@ -664,12 +597,9 @@ if st.button("Run Simulation"):
     # --- Store Results in Session State ---
     # This makes the results available for the plotting and display functions on the next rerun
     # Store all necessary variables, including the original data used for analysis summary
-    st.session_state.simulation_results = {
+    st.session_state.simulation_results = { # <-- Corrected typo here
         'historical_data_close_analyzed': historical_data_close_analyzed, # Store this too for the final table
-        'original_mean_float': original_mean_float, # New: Store original mean
-        'biased_mean_float_used': biased_mean_float,     # New: Store the biased mean used
-        'sma_period_used': sma_period,              # New: Store SMA period used
-        'bias_multiplier_used': bias_multiplier,    # New: Store bias multiplier used
+        'mean_float': mean_float, # Store historical stats
         'volatility_float': volatility_float, # Store historical stats (EWMA)
         'ewma_lambda_used': ewma_lambda, # Store lambda used
         'plot_sim_dates': plot_sim_dates_pd, # Store pandas DatetimeIndex for plotting/display
@@ -682,8 +612,8 @@ if st.button("Run Simulation"):
         'lower_band_2std': lower_band_2std, # New: Store -2 std dev band
         'final_prices': final_prices, # List of finite actual final prices
         'simulated_dates': simulated_dates_pd, # Dates for the simulation period (without start)
-        'delta_upper_pct': delta_upper_pct, # Store sidebar values (+1 std dev based)
-        'delta_lower_pct': delta_lower_pct, # Store sidebar values (-1 std dev based)
+        'delta_upper_pct': delta_upper_pct_2std, # Store sidebar values (+1 std dev based)
+        'delta_lower_pct': delta_lower_pct_2std, # Store sidebar values (-1 std dev based)
         'risk_reward_ratio': risk_reward_ratio, # Store sidebar values (+1/-1 std dev based)
         'num_simulations_ran': num_simulations, # Store number of sims run for display
     }
@@ -699,8 +629,8 @@ if st.button("Run Simulation"):
 # --- Display Risk/Reward and Key Forecasts (outside button block) ---
 # This runs on every rerun if simulation results are in session state
 # Moved from sidebar
-if st.session_state.simulation_results is not None:
-    results = st.session_state.simulation_results
+if st.session_state.simulation_results is not None: # <-- Corrected typo here
+    results = st.session_state.simulation_results # <-- Corrected typo here
 
     # Use .get() with default values in case keys are missing due to errors
     delta_upper_pct = results.get('delta_upper_pct', np.nan)
@@ -742,12 +672,10 @@ if full_historical_data is not None and not full_historical_data.empty:
     fig = plot_simulation(
         full_historical_data,
         historical_days_to_display,
-        st.session_state.simulation_results,
+        st.session_state.simulation_results, # <-- Corrected typo here
         ticker, # Pass ticker
-        len(historical_data_close_analyzed), # Pass analyzed data count for title
-        ewma_lambda, # Pass lambda for title
-        sma_period, # Pass SMA period for title
-        bias_multiplier # Pass bias multiplier for title
+        historical_data_close_analyzed, # Pass analyzed data for count in title
+        ewma_lambda # Pass lambda for title
     )
     st.pyplot(fig)
     plt.close(fig) # Always close the figure
@@ -762,18 +690,15 @@ else:
 
 # --- Display Results Table (outside button block, at the bottom) ---
 # This runs on every rerun. It displays the table IF simulation results are in session state.
-if st.session_state.simulation_results is not None:
+if st.session_state.simulation_results is not None: # <-- Corrected typo here
     st.subheader("Simulation and Analysis Summary")
 
-    results = st.session_state.simulation_results
+    results = st.session_state.simulation_results # <-- Corrected typo here
 
     # Get historical stats from stored results
     historical_data_analyzed = results.get('historical_data_close_analyzed')
     hist_analysis_days = len(historical_data_analyzed) if isinstance(historical_data_analyzed, pd.Series) else 0 # Safe length check
-    original_mean_log_return = results.get('original_mean_float', np.nan) # New
-    biased_mean_log_return_used = results.get('biased_mean_float_used', np.nan) # New
-    sma_period_used = results.get('sma_period_used', 'N/A') # New
-    bias_multiplier_used = results.get('bias_multiplier_used', 'N/A') # New
+    hist_mean_log_return = results.get('mean_float', np.nan)
     hist_volatility_log = results.get('volatility_float', np.nan) # This is the EWMA volatility
     ewma_lambda_used = results.get('ewma_lambda_used', 'N/A')
 
@@ -846,14 +771,10 @@ if st.session_state.simulation_results is not None:
     table_data = {
         'Metric': [
             'Historical Analysis Period (days)',
-            'Historical Mean Daily Log Return (Original)', # Updated label
+            'Historical Mean Daily Log Return',
             f'EWMA Daily Log Volatility ($\lambda$={ewma_lambda_used})',
             'Last Historical Price ($)', # Added this for clarity
             'Last Historical Date',      # Added this for clarity
-            '--- Bias Settings Used ---', # New separator
-            f'SMA Period for Bias ({sma_period_used} days)', # New row
-            f'Bias Multiplier ({bias_multiplier_used})', # New row
-            f'Biased Mean Daily Log Return (Used in Sim)', # New row
             '--- Simulation Results ---',
             'Number of Simulations',
             # Reference the last historical date safely
@@ -868,20 +789,16 @@ if st.session_state.simulation_results is not None:
             'Simulated -2 Std Dev Ending Price ($)',
             'Actual Min Simulated Ending Price ($)',
             'Actual Max Simulated Ending Price ($)',
-            'Expected movement to +1 Std Dev End (%)', # Keep in table for summary
-            'Expected movement to -1 Std Dev End (%)', # Keep in table for summary
+            'Expected movement to +2 Std Dev End (%)', # Keep in table for summary
+            'Expected movement to -2 Std Dev End (%)', # Keep in table for summary
             'Risk/Reward Ratio (+1 Gain : -1 Loss)', # Keep in table for summary
         ],
         'Value': [
             hist_analysis_days,
-            format_value(original_mean_log_return, ".6f"), # Use original mean
+            format_value(hist_mean_log_return, ".6f"),
             format_value(hist_volatility_log, ".6f"),
             format_value(last_historical_price_scalar, ".2f"), # Formatted safely
             last_historical_date_analysis.strftime('%Y-%m-%d') if isinstance(last_historical_date_analysis, (datetime, pd.Timestamp)) else str(last_historical_date_analysis), # Date format check
-            '', # Separator
-            sma_period_used, # Display SMA period
-            bias_multiplier_used, # Display bias multiplier
-            format_value(biased_mean_log_return_used, ".6f"), # Display biased mean
             '', # Separator
             num_sims_ran,
             sim_days,
