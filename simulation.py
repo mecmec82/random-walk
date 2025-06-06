@@ -348,6 +348,7 @@ if full_historical_data is not None and not full_historical_data.empty:
      historical_data_close_analyzed_initial = historical_data_for_sma_and_analysis_initial.tail(historical_days_analysis) # Data for analysis period based on current sidebar input
      max_display_days = len(historical_data_close_analyzed_initial)
 else:
+     historical_data_for_sma_and_analysis_initial = pd.Series() # Ensure it's a Series even if empty
      historical_data_close_analyzed_initial = pd.Series() # Ensure it's a Series even if empty
      max_display_days = 0
 
@@ -512,18 +513,27 @@ def format_percentage(value, format_str=".2f", default="N/A"):
 # Need data for analysis period + SMA lookback for the latest calculation
 # Ensure full_historical_data is not None/empty before calculating this
 if full_historical_data is not None and not full_historical_data.empty:
-     historical_data_for_sma_and_analysis_initial = full_historical_data.tail(historical_days_analysis + sma_period)
-     initial_original_mean, initial_biased_mean, initial_volatility, initial_sma_applied, initial_sma_message, initial_calc_error = \
-         calculate_historical_stats(
-             historical_data_for_sma_and_analysis_initial,
-             historical_days_analysis,
-             sma_period,
-             bias_multiplier,
-             ewma_lambda
-         )
+     # Use .tail() safely on the Series, checking length
+     required_initial_history = historical_days_analysis + sma_period
+     if len(full_historical_data) >= required_initial_history:
+          historical_data_for_sma_and_analysis_initial = full_historical_data.tail(required_initial_history)
+          initial_original_mean, initial_biased_mean, initial_volatility, initial_sma_applied, initial_sma_message, initial_calc_error = \
+              calculate_historical_stats(
+                  historical_data_for_sma_and_analysis_initial,
+                  historical_days_analysis,
+                  sma_period,
+                  bias_multiplier,
+                  ewma_lambda
+              )
+     else:
+         historical_data_for_sma_and_analysis_initial = pd.Series() # Ensure it's a Series even if empty
+         initial_original_mean, initial_biased_mean, initial_volatility, initial_sma_applied, initial_sma_message, initial_calc_error = \
+             np.nan, np.nan, np.nan, False, f"Not enough data fetched for initial analysis. Need {required_initial_history} days.", f"Not enough data fetched ({len(full_historical_data)} days)."
+
 else:
     # Set initial stats to None if data fetch failed
     historical_data_for_sma_and_analysis_initial = pd.Series()
+    historical_data_close_analyzed_initial = pd.Series() # Also ensure this is defined and empty
     initial_original_mean, initial_biased_mean, initial_volatility, initial_sma_applied, initial_sma_message, initial_calc_error = \
         np.nan, np.nan, np.nan, False, "No historical data fetched.", "No historical data fetched."
 
@@ -579,7 +589,13 @@ if st.button("Run Main Simulation"):
         # Get the start price (last price of the analysis period tail)
         # This is the last price in historical_data_for_sma_and_analysis_initial.tail(historical_days_analysis)
         try:
+            # Ensure historical_data_close_analyzed_latest is defined even if the initial calculation failed somehow
             historical_data_close_analyzed_latest = historical_data_for_sma_and_analysis_initial.tail(historical_days_analysis)
+            if historical_data_close_analyzed_latest.empty:
+                 st.error("Historical data for analysis is empty after taking the tail.")
+                 st.session_state.simulation_results = None
+                 st.stop()
+
             start_price_data = historical_data_close_analyzed_latest.iloc[-1]
             start_price = float(start_price_data.item()) if np.isfinite(start_price_data) else np.nan
         except Exception as e:
