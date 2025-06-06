@@ -306,6 +306,10 @@ def run_monte_carlo_simulation(start_price, biased_mean, volatility, simulation_
     prices_at_each_step = all_simulated_paths_np.T # Shape (sim_path_length, num_simulations)
 
     # Use nan functions in case any paths resulted in NaN/Inf (shouldn't happen with finite input)
+    # Ensure prices_at_each_step has at least one column (min 1 simulation) and one row (min 1 step+start)
+    if prices_at_each_step.shape[0] == 0 or prices_at_each_step.shape[1] == 0:
+         return None, None, None, None, None, None, None, "No simulated paths generated."
+
     median_prices = np.nanmedian(prices_at_each_step, axis=1)
     mean_prices = np.nanmean(prices_at_each_step, axis=1)
     std_dev_prices = np.nanstd(prices_at_each_step, axis=1)
@@ -318,12 +322,15 @@ def run_monte_carlo_simulation(start_price, biased_mean, volatility, simulation_
 
     # Return aggregate paths and final endpoints
     # Check if all aggregates are finite at the final step (index simulation_days)
-    final_step_index = simulation_days # Corresponds to the end price in the simulation (length is simulation_days + 1)
-    if (len(median_prices) <= final_step_index or
-        not np.isfinite([median_prices[final_step_index], mean_prices[final_step_index], std_dev_prices[final_step_index],
+    # Only check if simulation_days is a valid index
+    final_step_index = simulation_days
+    if final_step_index >= len(median_prices): # Should not happen if sim_path_length is correct
+        return None, None, None, None, None, None, None, f"Simulation path length ({len(median_prices)}) shorter than simulation days ({simulation_days})."
+
+    if not np.isfinite([median_prices[final_step_index], mean_prices[final_step_index], std_dev_prices[final_step_index],
                          upper_band_1std[final_step_index], lower_band_1std[final_step_index],
-                         upper_band_2std[final_step_index], lower_band_2std[final_step_index]]).all()):
-         return None, None, None, None, None, None, None, f"Calculated aggregate paths contain non-finite values at the final step (index {final_step_index})."
+                         upper_band_2std[final_step_index], lower_band_2std[final_step_index]]).all():
+         return None, None, None, None, None, None, None, f"Calculated aggregate values are non-finite at the final step (index {final_step_index})."
 
 
     return median_prices, mean_prices, std_dev_prices, upper_band_1std, lower_band_1std, upper_band_2std, lower_band_2std, None # Return None for error message if successful
@@ -335,11 +342,16 @@ def run_monte_carlo_simulation(start_price, biased_mean, volatility, simulation_
 # historical_data_close_analyzed needs to be calculated before the slider runs.
 # We need historical_data_for_sma_and_analysis_initial first.
 # Then we take the tail of that for the analysis period.
-historical_data_for_sma_and_analysis_initial = full_historical_data.tail(historical_days_analysis + sma_period)
-historical_data_close_analyzed_initial = historical_data_for_sma_and_analysis_initial.tail(historical_days_analysis) # Data for analysis period based on current sidebar input
+# Ensure full_historical_data is not None/empty before attempting tail()
+if full_historical_data is not None and not full_historical_data.empty:
+     historical_data_for_sma_and_analysis_initial = full_historical_data.tail(historical_days_analysis + sma_period)
+     historical_data_close_analyzed_initial = historical_data_for_sma_and_analysis_initial.tail(historical_days_analysis) # Data for analysis period based on current sidebar input
+     max_display_days = len(historical_data_close_analyzed_initial)
+else:
+     historical_data_close_analyzed_initial = pd.Series() # Ensure it's a Series even if empty
+     max_display_days = 0
 
 
-max_display_days = len(historical_data_close_analyzed_initial) # Use the length of the *analysis period* data
 # Set default value: requested days, capped by available, min 100 unless less data is available
 default_display_days = min(historical_days_analysis, max_display_days)
 default_display_days = max(100, default_display_days) if max_display_days >= 100 else max_display_days
@@ -498,15 +510,23 @@ def format_percentage(value, format_str=".2f", default="N/A"):
 
 # Calculate initial historical stats for display (based on the latest window)
 # Need data for analysis period + SMA lookback for the latest calculation
-historical_data_for_sma_and_analysis_initial = full_historical_data.tail(historical_days_analysis + sma_period)
-initial_original_mean, initial_biased_mean, initial_volatility, initial_sma_applied, initial_sma_message, initial_calc_error = \
-    calculate_historical_stats(
-        historical_data_for_sma_and_analysis_initial,
-        historical_days_analysis,
-        sma_period,
-        bias_multiplier,
-        ewma_lambda
-    )
+# Ensure full_historical_data is not None/empty before calculating this
+if full_historical_data is not None and not full_historical_data.empty:
+     historical_data_for_sma_and_analysis_initial = full_historical_data.tail(historical_days_analysis + sma_period)
+     initial_original_mean, initial_biased_mean, initial_volatility, initial_sma_applied, initial_sma_message, initial_calc_error = \
+         calculate_historical_stats(
+             historical_data_for_sma_and_analysis_initial,
+             historical_days_analysis,
+             sma_period,
+             bias_multiplier,
+             ewma_lambda
+         )
+else:
+    # Set initial stats to None if data fetch failed
+    historical_data_for_sma_and_analysis_initial = pd.Series()
+    initial_original_mean, initial_biased_mean, initial_volatility, initial_sma_applied, initial_sma_message, initial_calc_error = \
+        np.nan, np.nan, np.nan, False, "No historical data fetched.", "No historical data fetched."
+
 
 # Display initial stats calculated from the latest data
 st.subheader("Latest Historical Analysis")
@@ -541,6 +561,7 @@ if st.button("Run Main Simulation"):
     with st.spinner(f"Running {num_simulations} simulations for {simulation_days} days with EWMA λ={ewma_lambda}, SMA Period={sma_period}, Bias Multiplier={bias_multiplier}..."):
 
         # 1. Calculate Historical Stats for the latest period
+        # Re-calculate just in case parameters changed since initial calculation block
         original_mean, biased_mean, volatility, sma_applied, sma_message, calc_error = \
             calculate_historical_stats(
                 historical_data_for_sma_and_analysis_initial,
@@ -632,8 +653,13 @@ if st.button("Run Main Simulation"):
 
         if len(upper_band_1std) > 0 and len(lower_band_1std) > 0 and np.isfinite(start_price) and start_price > 0:
              # Endpoints are the last values in the respective bands
-             final_upper_price_1std = upper_band_1std[-1] if np.isfinite(upper_band_1std[-1]) else np.nan
-             final_lower_price_1std = lower_band_1std[-1] if np.isfinite(lower_band_1std[-1]) else np.nan
+             final_step_index_for_metrics = simulation_days # Metrics are for the *full* simulation period ending
+             # Adjust index if sim_path_length was truncated due to date generation issues
+             if final_step_index_for_metrics >= sim_path_length:
+                 final_step_index_for_metrics = sim_path_length - 1 # Use the very last available point
+
+             final_upper_price_1std = upper_band_1std[final_step_index_for_metrics] if np.isfinite(upper_band_1std[final_step_index_for_metrics]) else np.nan
+             final_lower_price_1std = lower_band_1std[final_step_index_for_metrics] if np.isfinite(lower_band_1std[final_step_index_for_metrics]) else np.nan
 
              # Percentage Delta to +1 Std Dev (using the +/- 1 band)
              if np.isfinite(final_upper_price_1std):
@@ -707,11 +733,17 @@ if st.button("Run Backtest"):
     # - Must be at least `simulation_days` trading days before the very last date.
     valid_backtest_start_dates = []
 
+    # Need at least min_historical_lookback + simulation_days + 1 trading days total for any valid backtest point
+    # (+1 because the start date and end date are distinct points)
     if len(all_dates_sorted) > (min_historical_lookback + simulation_days):
-        # Get the date that is `min_historical_lookback` trading days after the first date
+        # Get the date that is `min_historical_lookback` trading days *after* the first date
+        # This is the earliest possible date that can be a backtest START date
         earliest_valid_start_date = all_dates_sorted[min_historical_lookback]
-        # Get the date that is `simulation_days` trading days before the last date
-        latest_valid_start_date = all_dates_sorted[-1 - simulation_days] # Index -1 is last, -1-sim_days is sim_days before last
+
+        # Get the date that is `simulation_days` trading days *before* the last date
+        # This is the latest possible date that can be a backtest START date
+        latest_valid_start_date = all_dates_sorted[-1 - simulation_days] # Index -1 is last, -1-sim_days is sim_days trading days before last
+
 
         # Now, select dates from `all_dates_sorted` that are between or equal to `earliest_valid_start_date` and `latest_valid_start_date`
         potential_start_dates_in_range = all_dates_sorted[
@@ -726,7 +758,9 @@ if st.button("Run Backtest"):
 
     if not valid_backtest_start_dates:
         st.warning(f"Could not find any valid backtest start dates in the last {backtest_days_count} trading days that also have sufficient historical ({historical_days_analysis + sma_period}) and future ({simulation_days}) data in the fetched history.")
-        st.info(f"Fetched data range: {full_historical_data.index.min().strftime('%Y-%m-%d')} to {full_historical_data.index.max().strftime('%Y-%m-%d')}")
+        if full_historical_data is not None and not full_historical_data.empty:
+             st.info(f"Fetched data range: {full_historical_data.index.min().strftime('%Y-%m-%d')} to {full_historical_data.index.max().strftime('%Y-%m-%d')}. Total trading days fetched: {len(full_historical_data)}")
+             st.info(f"Need at least {historical_days_analysis} analysis days + {sma_period} SMA lookback days + {simulation_days} future days = {historical_days_analysis + sma_period + simulation_days} total trading days.")
         st.stop()
 
 
@@ -780,7 +814,8 @@ if st.button("Run Backtest"):
 
             # Get the start price (which is simply the price on `current_start_date`)
             try:
-                start_price = historical_window.iloc[-1].item() # Last price of the window should be current_start_date's price
+                # Use .iloc[-1].item() as historical_window ends on current_start_date
+                start_price = historical_window.iloc[-1].item()
                 if not np.isfinite(start_price) or start_price <= 0:
                      backtest_messages.append(f"Skipping {current_start_date.strftime('%Y-%m-%d')}: Invalid start price ({start_price})")
                      continue # Skip if start price is invalid
@@ -818,14 +853,17 @@ if st.button("Run Backtest"):
 
 
             # 5. Get the simulated band endpoints for the final step (simulation_days ahead)
-            # The endpoint index is `simulation_days` in the aggregated arrays (since index 0 is the start price)
+            # The endpoint index is `simulation_days` in the aggregated arrays (since index 0 is the start)
             final_step_index = simulation_days
+            # Check if the aggregated arrays have enough elements
             if len(upper_band_1std) > final_step_index and len(lower_band_1std) > final_step_index:
                  simulated_upper_end = upper_band_1std[final_step_index] if np.isfinite(upper_band_1std[final_step_index]) else np.nan
                  simulated_lower_end = lower_band_1std[final_step_index] if np.isfinite(lower_band_1std[final_step_index]) else np.nan
             else:
                  simulated_upper_end = np.nan
                  simulated_lower_end = np.nan
+                 backtest_messages.append(f"Skipping {current_start_date.strftime('%Y-%m-%d')}: Simulated band arrays too short ({len(upper_band_1std)}) for final step index ({final_step_index}).")
+                 continue # Skip if endpoints aren't available
 
 
             # 6. Compare actual price to the simulated +/- 1 Std Dev band
@@ -869,14 +907,12 @@ if st.session_state.simulation_results is not None:
     delta_lower_pct = results.get('delta_lower_pct', np.nan)
     risk_reward_ratio = results.get('risk_reward_ratio', np.nan)
     num_simulations_ran = results.get('num_simulations_ran', 'N/A')
-    start_price_display = format_value(results.get('start_price', np.nan), '.2f') # Safely format start price
-    # Safely get the last historical date string for display
+    start_price_display = format_value(results.get('start_price', np.nan), '.2f')
     historical_data_analyzed_for_date = results.get('historical_data_close_analyzed', pd.Series())
     last_historical_date_str = historical_data_analyzed_for_date.index.max().strftime('%Y-%m-%d') if isinstance(historical_data_analyzed_for_date, pd.Series) and not historical_data_analyzed_for_date.empty else 'N/A'
 
 
     st.subheader("Main Simulation Forecast Insights (+1/-1 Std Dev Based)")
-    # Use the safely formatted start price and date strings
     st.write(f"*(Based on {num_simulations_ran} runs from ${start_price_display} on {last_historical_date_str})*")
     col1, col2, col3 = st.columns(3)
 
@@ -930,7 +966,7 @@ if st.session_state.backtest_results is not None:
     col_bt3.metric("Pass Ratio", f"{results['pass_ratio']:.2f}%" if np.isfinite(results['pass_ratio']) else "N/A")
     col_bt4.metric("Simulations per Point", results['num_simulations_backtest_used'])
 
-    st.write(f"*(Backtest period: last {results['backtest_days_count_used']} trading days ending {results['sim_days_used']} days before today, using {results['historical_analysis_days_used']}-day analysis, {results['sma_period_used']}-day SMA bias ({results['bias_multiplier_used']} multiplier), EWMA λ={results['ewma_lambda_used']})*") # Updated description
+    st.write(f"*(Backtest period: last {results['backtest_days_count_used']} trading days ending {results['sim_days_used']} days before today, using {results['historical_analysis_days_used']}-day analysis, {results['sma_period_used']}-day SMA bias ({results['bias_multiplier_used']} multiplier), EWMA λ={results['ewma_lambda_used']})*")
 
     # Optional: Display backtest messages (can be long)
     if st.checkbox("Show Backtest Details"):
