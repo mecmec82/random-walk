@@ -92,25 +92,20 @@ st.sidebar.write("Note: Yahoo Finance data may have occasional inaccuracies or d
 
 
 # --- Helper function to fetch historical data using yfinance ---
-# Cached function: runs only when ticker or historical_days_requested changes
+# Cached function: runs only when ticker, historical_days_requested, or sma_period changes
+# (Need sma_period in cache key because fetch range depends on it)
 @st.cache_data(ttl=3600) # Cache data fetching results for 1 hour (3600 seconds)
-def fetch_historical_data(ticker, num_days):
+def fetch_historical_data(ticker, num_days_analysis, num_days_sma):
     """
-    Fetches historical data for a period covering at least num_days
+    Fetches historical data for a period covering analysis days + SMA days
     using yfinance. Returns a pandas Series of closing prices with datetime index.
     Includes basic filtering for positive prices and ensures DatetimeIndex.
     """
-    #st.info(f"Fetching historical data for {ticker} to cover at least {num_days} days...")
-
-    # Determine start date: go back enough calendar days to cover num_days *trading* days
-    # Using 2.5x as a generous estimate for stocks (approx 252 trading days/year)
-    # to ensure we fetch enough history even for longer analysis periods.
-    # Add buffer for SMA calculation as well
+    # Need analysis period + sma_period data for SMA calculation at the end of the analysis period
+    total_days_needed = num_days_analysis + num_days_sma
+    # Use a generous estimate (2.5x) for calendar days to ensure we get enough trading days
     end_date = datetime.now()
-    # Need historical_days_requested + sma_period data for SMA calculation
-    # Total calendar days needed = (historical_days_requested + sma_period) * buffer
-    days_buffer = max(historical_days_requested, sma_period) # Ensure we fetch enough for the larger period
-    start_date = end_date - timedelta(days=int(days_buffer * 2.5))
+    start_date = end_date - timedelta(days=int(total_days_needed * 2.5))
 
 
     try:
@@ -166,22 +161,20 @@ def fetch_historical_data(ticker, num_days):
 # It fetches enough data to satisfy the historical_days_requested plus the SMA period buffer.
 full_historical_data = fetch_historical_data(
     ticker=ticker,
-    # Fetch data for analysis period PLUS SMA period
-    num_days=historical_days_requested + sma_period # Increased fetch range
+    num_days_analysis=historical_days_requested,
+    num_days_sma=sma_period # Pass SMA period
 )
 
-# Select the specific subset for ANALYSIS (the most recent historical_days_requested days)
-# This is the data used downstream for calculating mean/volatility and starting the simulation.
-# This calculation runs on every rerun, but uses the cached full_historical_data.
 # We need enough data *before* the analysis period starts to calculate the SMA at the start of the analysis period.
-# So we take the tail covering analysis period + SMA period.
+# So we take the tail covering analysis period + SMA period from the fetched data.
 historical_data_for_sma_and_analysis = full_historical_data.tail(historical_days_requested + sma_period)
 
 
 # --- Check if we have enough data for analysis and SMA ---
 # This check runs on initial load and input changes (before button click)
-if historical_data_for_sma_and_analysis.empty or len(historical_data_for_sma_and_analysis) < historical_days_requested + sma_period:
-     st.warning(f"Enter parameters and click 'Run Simulation'. Not enough historical data available for analysis ({len(historical_data_for_sma_and_analysis)} days). Need at least {historical_days_requested + sma_period} days for EWMA and {sma_period}-day SMA calculation.")
+min_required_days = historical_days_requested + sma_period # Total data needed for SMA at end of analysis period
+if historical_data_for_sma_and_analysis.empty or len(historical_data_for_sma_and_analysis) < min_required_days:
+     st.warning(f"Enter parameters and click 'Run Simulation'. Not enough historical data available for analysis ({len(historical_data_for_sma_and_analysis)} days). Need at least {min_required_days} days for EWMA and {sma_period}-day SMA calculation ending at the analysis period.")
      st.stop()
 
 
@@ -191,7 +184,8 @@ if historical_data_for_sma_and_analysis.empty or len(historical_data_for_sma_and
 with st.spinner("Calculating historical statistics (EWMA volatility & SMA bias)..."):
 
     # The data needed for EWMA volatility is log returns *over the analysis period*.
-    # We apply the SMA bias based on the price/SMA at the *end* of the analysis period.
+    # The data needed for SMA bias is the price/SMA at the *end* of the analysis period,
+    # requiring a lookback window BEFORE the analysis period.
 
     # First, isolate the data strictly for the analysis period (excluding the extra days needed for SMA calculation)
     # This is the data `historical_days_requested` long.
@@ -208,46 +202,48 @@ with st.spinner("Calculating historical statistics (EWMA volatility & SMA bias).
         st.error(f"Not enough valid historical data ({len(historical_data_close_analyzed)} prices in analysis period) to calculate returns and volatility after dropping NaNs. Need at least 2 consecutive valid prices.")
         st.stop()
 
-    # Simple Mean Daily Log Return (This is the original mean before bias)
-    mean_daily_log_return = log_returns.mean()
+    # 1. Calculate Original Mean Daily Log Return
+    original_mean_float = float(log_returns.mean().item()) # Use item() to get scalar
 
-    # --- Calculate EWMA Daily Log Volatility ---
-    # Calculated on returns over the analysis period
+    # 2. Calculate EWMA Daily Log Volatility
     ewma_alpha = 1 - ewma_lambda
+    daily_log_volatility = np.nan # Initialize
+
     try:
+        # Calculate EWMA of squared returns (variance) on the analysis period returns
         ewma_variance_series = log_returns.astype(float).pow(2).ewm(alpha=ewma_alpha, adjust=False, min_periods=0).mean()
+        # The EWMA volatility for the *next* step is the square root of the *last* EWMA variance
+        # Use .iloc[-1] and .item() to get scalar, then convert to float
         ewma_daily_log_volatility_scalar = np.sqrt(ewma_variance_series.iloc[-1]).item()
         daily_log_volatility = float(ewma_daily_log_volatility_scalar)
+
     except Exception as e:
         st.error(f"Error calculating EWMA volatility: {e}")
-        daily_log_volatility = np.nan # Indicate failure
+        # daily_log_volatility remains np.nan
 
-    # --- Calculate SMA and Apply Bias to Mean ---
-    original_mean_float = float(mean_daily_log_return.item()) # Store the original mean
-    biased_mean_float = original_mean_float   # Start with the original mean
+    # 3. Calculate SMA and Determine Bias
+    biased_mean_float = original_mean_float # Start with the original mean
 
-
-    # Calculate the SMA over the larger data window
+    # Calculate the SMA over the larger data window (`historical_data_for_sma_and_analysis`)
+    # The SMA for date X is the average of the closing prices for date X and the previous (sma_period - 1) dates.
+    # The last value of this SMA series is the SMA ending on the LAST date of historical_data_for_sma_and_analysis.
     sma_series = historical_data_for_sma_and_analysis.rolling(window=sma_period).mean().dropna()
 
     # Ensure SMA series has a value corresponding to the end of the analysis period
-    # The index of sma_series aligns with the end date of the window.
-    # The last value of sma_series should correspond to the SMA ending on the last day of
-    # the `historical_data_for_sma_and_analysis` series.
-    # The price to compare is the last price in the `historical_data_close_analyzed` series.
+    # The index of `historical_data_close_analyzed.index.max()` must exist in `sma_series.index`.
+    last_date_analyzed = historical_data_close_analyzed.index.max()
 
-    if not sma_series.empty and sma_series.index.max() >= historical_data_close_analyzed.index.max():
+    if not sma_series.empty and last_date_analyzed in sma_series.index:
          try:
               # Get the last price from the data used for ANALYSIS
               last_price_for_sma_comp = historical_data_close_analyzed.iloc[-1].item()
 
               # Get the SMA value corresponding to the last date in the analysis period
-              # Use .loc to align by date, .iloc[-1] on the result just in case of multiple entries for a date (unlikely with daily)
-              last_sma_value = sma_series.loc[historical_data_close_analyzed.index.max()].iloc[-1].item()
+              last_sma_value = sma_series.loc[last_date_analyzed].item()
 
 
               st.sidebar.write(f"Last Price vs {sma_period}-Day SMA:")
-              st.sidebar.write(f"  Last Price ({historical_data_close_analyzed.index.max().strftime('%Y-%m-%d')}): ${last_price_for_sma_comp:.2f}")
+              st.sidebar.write(f"  Last Price ({last_date_analyzed.strftime('%Y-%m-%d')}): ${last_price_for_sma_comp:.2f}")
               st.sidebar.write(f"  {sma_period}-Day SMA ({sma_series.index.max().strftime('%Y-%m-%d')}): ${last_sma_value:.2f}")
 
 
@@ -267,36 +263,34 @@ with st.spinner("Calculating historical statistics (EWMA volatility & SMA bias).
               st.sidebar.write(f"  Biased Mean Drift: {biased_mean_float:.6f}")
 
          except Exception as e:
-              st.error(f"Error calculating or applying SMA bias based on specific date: {e}")
+              st.error(f"Error calculating or applying SMA bias based on specific date ({last_date_analyzed.strftime('%Y-%m-%d')}): {e}")
               st.sidebar.error("SMA bias calculation failed, using original mean.")
               biased_mean_float = original_mean_float # Ensure it's the original mean if bias fails
     else:
-        st.warning(f"Not enough historical data for {sma_period}-day SMA calculation to cover the analysis period end date. Need data going back at least {historical_days_requested + sma_period} days.")
+        st.warning(f"Not enough historical data ({len(historical_data_for_sma_and_analysis)} days fetched) for {sma_period}-day SMA calculation to cover the analysis period end date ({last_date_analyzed.strftime('%Y-%m-%d')}). Need data going back at least {historical_days_requested + sma_period} days.")
         st.sidebar.warning("SMA bias calculation skipped, using original mean.")
         biased_mean_float = original_mean_float # Ensure it's the original mean if bias fails
 
 
-    # Now, use the potentially biased mean for the simulation
-    loc_sim = biased_mean_float
-    scale_sim = volatility_float # Volatility calculation remains the same
+    # 4. Final Validation and Assignment for Simulation
+    mean_float_for_sim = np.nan # Initialize final values
+    volatility_float_for_sim = np.nan
 
-    # --- Type and finiteness checks for calculated values ---
-    # Checks for mean_float and volatility_float are done on the values *used in the simulation*
+    # Check if calculated biased mean and volatility are finite and volatility is positive
     try:
-        loc_sim_float_checked = float(loc_sim) # Ensure loc_sim is convertible to float
-        scale_sim_float_checked = float(scale_sim) # Ensure scale_sim is convertible to float
+        if np.isfinite(biased_mean_float) and np.isfinite(daily_log_volatility) and daily_log_volatility > 0:
+            mean_float_for_sim = float(biased_mean_float) # Ensure it's float
+            volatility_float_for_sim = float(daily_log_volatility) # Ensure it's float
+        else:
+             st.error(f"Final calculated mean ({biased_mean_float:.6f}) or volatility ({daily_log_volatility:.6f}) is non-finite or volatility is not positive. Cannot run simulation.")
+             st.stop() # Stop if final values are bad
+
     except (TypeError, ValueError) as e:
-         st.error(f"Final calculated mean or volatility has unexpected type/value before simulation: {e}")
-         st.info(f"Mean value: {loc_sim}, Volatility value: {scale_sim}")
-         st.stop() # Stop before simulation if stats are bad
+         st.error(f"Final mean ({biased_mean_float}) or volatility ({daily_log_volatility}) has unexpected type/value: {e}")
+         st.stop() # Stop if conversion fails
 
-    if not np.isfinite(loc_sim_float_checked) or not np.isfinite(scale_sim_float_checked) or scale_sim_float_checked <= 0:
-         st.error(f"Final calculated mean ({loc_sim_float_checked:.6f}) or volatility ({scale_sim_float_checked:.6f}) is not finite or volatility is not positive. Cannot run simulation.")
-         st.stop()
-
-    # Store the validated float values to be used in the simulation
-    mean_float_for_sim = loc_sim_float_checked
-    volatility_float_for_sim = scale_sim_float_checked
+    # Now mean_float_for_sim and volatility_float_for_sim hold the valid, final values.
+    # The simulation block will use these.
 
 
 # --- Add Slider for Displayed Historical Days ---
@@ -469,7 +463,7 @@ def plot_simulation(full_historical_data, historical_days_to_display, simulation
 
 
     # Set plot title to reflect displayed historical range vs analysis range
-    plot_title = f'{ticker} Price: Historical Data ({len(historical_data_to_plot)}/{historical_data_close_analyzed_len} days analyzed) & Simulation (EWMA $\lambda$={ewma_lambda}, SMA Bias Period={sma_period}, Multiplier={bias_multiplier})' # Updated title
+    plot_title = f'{ticker} Price: Historical Data ({len(historical_data_to_plot)} days displayed, {historical_data_close_analyzed_len} days analyzed) & Simulation (EWMA $\lambda$={ewma_lambda}, SMA Bias Period={sma_period}, Multiplier={bias_multiplier})' # Updated title
     ax.set_title(plot_title)
     ax.set_xlabel('Date')
     ax.set_ylabel('Price ($)')
@@ -514,17 +508,19 @@ if st.button("Run Simulation"):
         # Get start price from the data used for analysis
         # Ensure historical_data_close_analyzed is not empty before trying to get the last price
         # The data needed is historical_data_close_analyzed (tail of full_historical_data)
+        # This data subset is created *before* the button click in the main flow
         if historical_data_close_analyzed.empty:
-            st.error("Cannot run simulation: Historical data for analysis is empty.")
+             # This case should have been caught by the check before the spinner, but being defensive
+            st.error("Cannot run simulation: Historical data for analysis is empty after calculation block.")
             st.session_state.simulation_results = None
             st.stop()
 
         try:
             # Use .iloc[-1].item() to explicitly get the scalar value and avoid FutureWarning
             start_price = float(historical_data_close_analyzed.iloc[-1].item())
-        except (TypeError, ValueError) as e:
-             st.error(f"Unexpected value or type for last historical price: {e}")
-             start_price = np.nan # Set to NaN if conversion fails
+        except Exception as e: # Catch broader exception in case of index error etc.
+             st.error(f"Error getting last historical price: {e}")
+             start_price = np.nan # Set to NaN if error occurs
 
         if not np.isfinite(start_price) or start_price <= 0:
              st.error(f"Last historical price ({start_price}) is not a finite positive number. Cannot start simulation.")
@@ -537,6 +533,12 @@ if st.button("Run Simulation"):
 
         loc_sim = mean_float_for_sim # Use the calculated and checked biased mean
         scale_sim = volatility_float_for_sim # Use the calculated and checked EWMA volatility
+
+        # Ensure these values are valid before proceeding (already checked, but safety first)
+        if not np.isfinite(loc_sim) or not np.isfinite(scale_sim) or scale_sim <= 0:
+             st.error(f"Internal Error: Final calculated mean ({loc_sim:.6f}) or volatility ({scale_sim:.6f}) is not finite or volatility is not positive before simulation start.")
+             st.session_state.simulation_results = None
+             st.stop()
 
 
         # Prepare dates for simulation results plotting (based on analysis dates)
@@ -628,6 +630,7 @@ if st.button("Run Simulation"):
 
 
         # --- Calculate Forecast Metrics (based on +/- 1 std dev) ---
+        # Note: These calculations are based on the *endpoints* of the mean +/- 1 Std Dev band
         delta_upper_pct = np.nan
         delta_lower_pct = np.nan
         risk_reward_ratio = np.nan
@@ -636,8 +639,7 @@ if st.button("Run Simulation"):
         last_historical_price_scalar = float(historical_data_close_analyzed.iloc[-1].item()) # Use .item()
 
 
-        # Ensure final aggregate band values are finite for percentage calculation
-        # Risk/Reward and +/- 1 Std Dev movement are based on +/- 1 band endpoints
+        # Ensure final aggregate band values (+/- 1 Std Dev) are finite for percentage calculation
         final_upper_price_1std = upper_band[-1] if len(upper_band) > 0 and np.isfinite(upper_band[-1]) else np.nan
         final_lower_price_1std = lower_band[-1] if len(lower_band) > 0 and np.isfinite(lower_band[-1]) else np.nan
 
@@ -650,6 +652,7 @@ if st.button("Run Simulation"):
              delta_lower_pct = ((final_lower_price_1std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
         # Risk/Reward Ratio (Handle division by zero or negative risk)
+        # Based on the +/- 1 Std Dev percentage movements
         if np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
              potential_reward = delta_upper_pct
              potential_risk_abs = -delta_lower_pct # Absolute magnitude of downside movement
@@ -670,7 +673,7 @@ if st.button("Run Simulation"):
         'biased_mean_float_used': biased_mean_float,     # New: Store the biased mean used
         'sma_period_used': sma_period,              # New: Store SMA period used
         'bias_multiplier_used': bias_multiplier,    # New: Store bias multiplier used
-        'volatility_float': volatility_float, # Store historical stats (EWMA)
+        'volatility_float': volatility_float_for_sim, # Store historical stats (EWMA) - Use the validated value
         'ewma_lambda_used': ewma_lambda, # Store lambda used
         'plot_sim_dates': plot_sim_dates_pd, # Store pandas DatetimeIndex for plotting/display
         'median_prices': median_prices,
@@ -682,9 +685,9 @@ if st.button("Run Simulation"):
         'lower_band_2std': lower_band_2std, # New: Store -2 std dev band
         'final_prices': final_prices, # List of finite actual final prices
         'simulated_dates': simulated_dates_pd, # Dates for the simulation period (without start)
-        'delta_upper_pct': delta_upper_pct, # Store sidebar values (+1 std dev based)
-        'delta_lower_pct': delta_lower_pct, # Store sidebar values (-1 std dev based)
-        'risk_reward_ratio': risk_reward_ratio, # Store sidebar values (+1/-1 std dev based)
+        'delta_upper_pct': delta_upper_pct, # Store values (+1 std dev based)
+        'delta_lower_pct': delta_lower_pct, # Store values (-1 std dev based)
+        'risk_reward_ratio': risk_reward_ratio, # Store values (+1/-1 std dev based)
         'num_simulations_ran': num_simulations, # Store number of sims run for display
     }
     #st.success("Simulation completed and results stored.")
@@ -709,7 +712,7 @@ if st.session_state.simulation_results is not None:
     num_simulations_ran = results.get('num_simulations_ran', 'N/A')
 
 
-    st.subheader("Simulation Forecast Insights")
+    st.subheader("Simulation Forecast Insights (+1/-1 Std Dev Based)") # Added clarification
     st.write(f"*(Based on {num_simulations_ran} runs)*")
     col1, col2, col3 = st.columns(3) # Use columns for better layout
 
@@ -833,9 +836,20 @@ if st.session_state.simulation_results is not None:
     actual_max_end_price = np.max(final_prices_list) if final_prices_list else np.nan
 
     # Get delta percentages and risk/reward from stored values (calculated based on +/- 1 std dev)
-    delta_upper_pct = results.get('delta_upper_pct', np.nan)
-    delta_lower_pct = results.get('delta_lower_pct', np.nan)
+    # These are calculated based on the +/- 1 std dev band in the simulation block
+    delta_upper_pct_1std = results.get('delta_upper_pct', np.nan) # Renamed for clarity in table
+    delta_lower_pct_1std = results.get('delta_lower_pct', np.nan) # Renamed for clarity in table
     risk_reward_ratio_val = results.get('risk_reward_ratio', np.nan)
+
+
+    # Recalculate delta percentages for +/- 2 Std Dev FOR TABLE DISPLAY
+    # This is just for displaying in the table, the main metrics above the plot are +/- 1 Std Dev
+    delta_upper_pct_2std = np.nan
+    delta_lower_pct_2std = np.nan
+    if np.isfinite(upper_band_end_price_2std) and last_historical_price_scalar > 0:
+         delta_upper_pct_2std = ((upper_band_end_price_2std - last_historical_price_scalar) / last_historical_price_scalar) * 100
+    if np.isfinite(lower_band_end_price_2std) and last_historical_price_scalar > 0:
+         delta_lower_pct_2std = ((lower_band_end_price_2std - last_historical_price_scalar) / last_historical_price_scalar) * 100
 
 
     # Prepare data for the table
@@ -870,6 +884,8 @@ if st.session_state.simulation_results is not None:
             'Actual Max Simulated Ending Price ($)',
             'Expected movement to +1 Std Dev End (%)', # Keep in table for summary
             'Expected movement to -1 Std Dev End (%)', # Keep in table for summary
+            'Expected movement to +2 Std Dev End (%)', # New: Add +/- 2 Std Dev percentage movements to table
+            'Expected movement to -2 Std Dev End (%)',
             'Risk/Reward Ratio (+1 Gain : -1 Loss)', # Keep in table for summary
         ],
         'Value': [
@@ -895,8 +911,10 @@ if st.session_state.simulation_results is not None:
             format_value(lower_band_end_price_2std, ".2f"), # New: Use _2std variable
             format_value(actual_min_end_price, ".2f"),
             format_value(actual_max_end_price, ".2f"),
-            format_percentage(delta_upper_pct, ".2f"), # Use helper
-            format_percentage(delta_lower_pct, ".2f"), # Use helper
+            format_percentage(delta_upper_pct_1std, ".2f"), # Use _1std percentage delta
+            format_percentage(delta_lower_pct_1std, ".2f"), # Use _1std percentage delta
+            format_percentage(delta_upper_pct_2std, ".2f"), # New: Use _2std percentage delta
+            format_percentage(delta_lower_pct_2std, ".2f"), # New: Use _2std percentage delta
             f"{format_value(risk_reward_ratio_val, '.2f')} : 1" if np.isfinite(risk_reward_ratio_val) and risk_reward_ratio_val != np.inf else ("Infinite" if risk_reward_ratio_val == np.inf else "N/A"),
         ]
     }
