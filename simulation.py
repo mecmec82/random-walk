@@ -143,7 +143,7 @@ if historical_data_close_analyzed.empty or len(historical_data_close_analyzed) <
 
 
 # --- Add Slider for Start Simulation X Days Ago ---
-max_offset_days_allowed = min(0, len(historical_data_close_analyzed) - 1)
+max_offset_days_allowed = max(0, len(historical_data_close_analyzed) - 1)
 start_offset_days = st.sidebar.slider(
     "Start Simulation X Days Ago",
     min_value=0,
