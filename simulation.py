@@ -475,4 +475,164 @@ if st.session_state.simulation_results is not None:
     results = st.session_state.simulation_results
 
     delta_upper_pct = results.get('delta_upper_pct', np.nan)
-    de
+    delta_lower_pct = results.get('delta_lower_pct', np.nan) # Corrected typo here
+    risk_reward_ratio = results.get('risk_reward_ratio', np.nan)
+    num_simulations_ran = results.get('num_simulations_ran', 'N/A')
+
+    st.subheader("Simulation Forecast Insights")
+    st.write(f"*(Based on {num_simulations_ran} runs)*")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(label="Expected movement to +1 Std Dev End", value=format_percentage(delta_upper_pct, '.2f', 'N/A'))
+    with col2:
+        st.metric(label="Expected movement to -1 Std Dev End", value=format_percentage(delta_lower_pct, '.2f', 'N/A'))
+    with col3:
+        risk_reward_str = "N/A"
+        if np.isfinite(risk_reward_ratio):
+             if risk_reward_ratio == np.inf:
+                  risk_reward_str = "Infinite"
+             else:
+                  risk_reward_str = f"{risk_reward_ratio:.2f} : 1"
+        elif np.isfinite(delta_upper_pct) and np.isfinite(delta_lower_pct):
+             risk_reward_str = "Undetermined / Favorable Downside"
+
+        st.metric(label="Risk/Reward Ratio (+1 Gain : -1 Loss)", value=risk_reward_str)
+
+
+# --- Display Plot ---
+st.subheader("Price Chart: Historical Data, Median, and Standard Deviation Band")
+if full_historical_data is not None and not full_historical_data.empty:
+    fig = plot_simulation(
+        full_historical_data,
+        historical_days_to_display,
+        st.session_state.simulation_results,
+        ticker,
+        ewma_lambda
+    )
+    st.pyplot(fig)
+    plt.close(fig)
+else:
+    if 'full_historical_data' in locals() and (full_historical_data is None or full_historical_data.empty):
+         st.error("Cannot display plot because historical data fetching failed.")
+    else:
+         st.warning("Waiting for historical data...")
+
+
+# --- Display Results Table ---
+if st.session_state.simulation_results is not None:
+    st.subheader("Simulation and Analysis Summary")
+
+    results = st.session_state.simulation_results
+
+    historical_data_analyzed = results.get('historical_data_close_analyzed')
+    hist_analysis_days = len(historical_data_analyzed) if isinstance(historical_data_analyzed, pd.Series) else 0
+    hist_mean_log_return = results.get('mean_float', np.nan)
+    hist_volatility_log = results.get('volatility_float', np.nan)
+    ewma_lambda_used = results.get('ewma_lambda_used', 'N/A')
+
+    last_historical_price_scalar = np.nan
+    last_historical_date_analysis = "N/A"
+
+    if isinstance(historical_data_analyzed, pd.Series) and not historical_data_analyzed.empty:
+        try:
+            raw_last_value = historical_data_analyzed.iloc[-1]
+            if np.isfinite(raw_last_value):
+                last_historical_price_scalar = float(raw_last_value.item())
+                last_historical_date_analysis = historical_data_analyzed.index[-1]
+            else:
+                 st.warning("Last historical price is non-finite (NaN/Inf), cannot display in table.")
+        except Exception as e:
+            st.error(f"Error processing last historical price or date for table: {e}")
+
+
+    num_sims_ran = results.get('num_simulations_ran', 'N/A')
+    sim_dates_pd = results.get('simulated_dates', pd.DatetimeIndex([]))
+    sim_start_date_used = results.get('simulation_start_date', "N/A")
+    start_offset_days_used = results.get('start_offset_days_used', 0)
+    total_sim_steps_used = results.get('total_sim_steps', 0)
+    future_sim_days_input = results.get('future_simulation_days_input', 0)
+
+    sim_end_date = sim_dates_pd.max() if len(sim_dates_pd) > 0 else "N/A"
+
+    median_prices_array = results.get('median_prices', np.array([]))
+    mean_prices_array = results.get('mean_prices', np.array([]))
+    std_dev_prices_array = results.get('std_dev_prices', np.array([]))
+    upper_band_array = results.get('upper_band', np.array([]))
+    lower_band_array = results.get('lower_band', np.array([]))
+    upper_band_2std_array = results.get('upper_band_2std', np.array([]))
+    lower_band_2std_array = results.get('lower_band_2std', np.array([]))
+    final_prices_list = results.get('final_prices', [])
+
+    median_end_price = median_prices_array[-1] if len(median_prices_array) > 0 and np.isfinite(median_prices_array[-1]) else np.nan
+    mean_end_price = mean_prices_array[-1] if len(mean_prices_array) > 0 and np.isfinite(mean_prices_array[-1]) else np.nan
+    std_dev_end = std_dev_prices_array[-1] if len(std_dev_prices_array) > 0 and np.isfinite(std_dev_prices_array[-1]) else np.nan
+    upper_band_end_price_1std = upper_band_array[-1] if len(upper_band_array) > 0 and np.isfinite(upper_band_array[-1]) else np.nan
+    lower_band_end_price_1std = lower_band_array[-1] if len(lower_band_array) > 0 and np.isfinite(lower_band_array[-1]) else np.nan
+    upper_band_end_price_2std = upper_band_2std_array[-1] if len(upper_band_2std_array) > 0 and np.isfinite(upper_band_2std_array[-1]) else np.nan
+    lower_band_end_price_2std = lower_band_2std_array[-1] if len(lower_band_2std_array) > 0 and np.isfinite(lower_band_2std_array[-1]) else np.nan
+
+    actual_min_end_price = np.min(final_prices_list) if final_prices_list else np.nan
+    actual_max_end_price = np.max(final_prices_list) if final_prices_list else np.nan
+
+    delta_upper_pct = results.get('delta_upper_pct', np.nan)
+    delta_lower_pct = results.get('delta_lower_pct', np.nan)
+    risk_reward_ratio_val = results.get('risk_reward_ratio', np.nan)
+
+    table_data = {
+        'Metric': [
+            'Historical Analysis Period (days)',
+            'Historical Mean Daily Log Return',
+            f'EWMA Daily Log Volatility ($\lambda$={ewma_lambda_used})',
+            'Last Historical Price ($)',
+            'Last Historical Date',
+            '--- Simulation Results ---',
+            'Number of Simulations',
+            'Simulation Starting X Days Ago',
+            'Simulation Start Date',
+            'Total Simulation Steps (Offset + Future)',
+            'Forecasted Days into Future (from current)',
+            'Simulation End Date',
+            'Simulated Median Ending Price ($)',
+            'Simulated Mean Ending Price ($)',
+            'Simulated Std Dev Ending Price ($)',
+            'Simulated +1 Std Dev Ending Price ($)',
+            'Simulated -1 Std Dev Ending Price ($)',
+            'Simulated +2 Std Dev Ending Price ($)',
+            'Simulated -2 Std Dev Ending Price ($)',
+            'Actual Min Simulated Ending Price ($)',
+            'Actual Max Simulated Ending Price ($)',
+            'Expected movement to +1 Std Dev End (%)',
+            'Expected movement to -1 Std Dev End (%)',
+            'Risk/Reward Ratio (+1 Gain : -1 Loss)',
+        ],
+        'Value': [
+            str(hist_analysis_days),
+            format_value(hist_mean_log_return, ".6f"),
+            format_value(hist_volatility_log, ".6f"),
+            format_value(last_historical_price_scalar, ".2f"),
+            last_historical_date_analysis.strftime('%Y-%m-%d') if isinstance(last_historical_date_analysis, (datetime, pd.Timestamp)) else str(last_historical_date_analysis),
+            '',
+            str(num_sims_ran),
+            str(start_offset_days_used),
+            sim_start_date_used.strftime('%Y-%m-%d') if isinstance(sim_start_date_used, (datetime, pd.Timestamp)) else str(sim_start_date_used),
+            str(total_sim_steps_used),
+            str(future_sim_days_input),
+            sim_end_date.strftime('%Y-%m-%d') if isinstance(sim_end_date, (datetime, pd.Timestamp)) else str(sim_end_date),
+            format_value(median_end_price, ".2f"),
+            format_value(mean_end_price, ".2f"),
+            format_value(std_dev_end, ".2f"),
+            format_value(upper_band_end_price_1std, ".2f"),
+            format_value(lower_band_end_price_1std, ".2f"),
+            format_value(upper_band_end_price_2std, ".2f"),
+            format_value(lower_band_end_price_2std, ".2f"),
+            format_value(actual_min_end_price, ".2f"),
+            format_value(actual_max_end_price, ".2f"),
+            format_percentage(delta_upper_pct, ".2f"),
+            format_percentage(delta_lower_pct, ".2f"),
+            f"{format_value(risk_reward_ratio_val, '.2f')} : 1" if np.isfinite(risk_reward_ratio_val) and risk_reward_ratio_val != np.inf else ("Infinite" if risk_reward_ratio_val == np.inf else "N/A"),
+        ]
+    }
+
+    results_df = pd.DataFrame(table_data)
+    st.dataframe(results_df, hide_index=True, use_container_width=True)
